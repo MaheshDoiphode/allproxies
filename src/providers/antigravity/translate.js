@@ -334,12 +334,35 @@ export function finishReason(raw, tools) {
 }
 
 export function usageFromGemini(payload) {
-  const meta = payload.usageMetadata || {};
-  const prompt = Number(meta.promptTokenCount || 0);
-  const candidates = Number(meta.candidatesTokenCount || 0);
-  const thoughts = Number(meta.thoughtsTokenCount || 0);
-  const total = Number(meta.totalTokenCount || prompt + candidates + thoughts);
-  return { prompt_tokens: prompt, completion_tokens: candidates, total_tokens: total, reasoning_tokens: thoughts };
+  const meta = payload?.usageMetadata || payload?.usage_metadata || {};
+  const prompt = Number(meta.promptTokenCount ?? meta.prompt_token_count ?? 0);
+  const cached = Number(meta.cachedContentTokenCount ?? meta.cached_content_token_count ?? 0);
+  const candidates = Number(meta.candidatesTokenCount ?? meta.candidates_token_count ?? 0);
+  const thoughts = Number(meta.thoughtsTokenCount ?? meta.thoughts_token_count ?? 0);
+  const toolUse = Number(meta.toolUsePromptTokenCount ?? meta.tool_use_prompt_token_count ?? 0);
+  const output = candidates + thoughts;
+  const input = prompt || (cached + toolUse);
+  const total = Number(meta.totalTokenCount ?? meta.total_token_count ?? 0) || (input + output);
+  return {
+    prompt_tokens: input,
+    completion_tokens: output,
+    total_tokens: total,
+    reasoning_tokens: thoughts,
+    cached_tokens: cached,
+  };
+}
+
+export function anthropicUsageFromGemini(payload, { includeOutputDetails = true } = {}) {
+  const usage = usageFromGemini(payload);
+  const out = {
+    input_tokens: usage.prompt_tokens,
+    output_tokens: usage.completion_tokens,
+  };
+  if (usage.cached_tokens) out.cache_read_input_tokens = usage.cached_tokens;
+  if (includeOutputDetails && usage.reasoning_tokens) {
+    out.output_tokens_details = { thinking_tokens: usage.reasoning_tokens };
+  }
+  return out;
 }
 
 export function geminiToOpenai(payload, model) {
@@ -379,7 +402,7 @@ export function geminiToAnthropic(payload, model) {
       input: JSON.parse(call.function.arguments || "{}"),
     });
   }
-  const usage = usageFromGemini(inner);
+  const usage = anthropicUsageFromGemini(inner);
   let stop = content.some((part) => part.type === "tool_use") ? "tool_use" : "end_turn";
   if (String(first.finishReason || "").toUpperCase() === "MAX_TOKENS") stop = "max_tokens";
   return {
@@ -389,7 +412,7 @@ export function geminiToAnthropic(payload, model) {
     model,
     content: content.length ? content : [{ type: "text", text: "" }],
     stop_reason: stop,
-    usage: { input_tokens: usage.prompt_tokens, output_tokens: usage.completion_tokens },
+    usage,
   };
 }
 
@@ -441,10 +464,24 @@ export class AnthropicStreamAccumulator {
   ingest(payload) {
     const inner = unwrapResponse(payload);
     const candidates = inner.candidates || [];
-    if (!candidates.length) return [];
+    const nextUsage = anthropicUsageFromGemini(inner);
+    if (nextUsage.input_tokens || nextUsage.output_tokens || nextUsage.cache_read_input_tokens) {
+      this.usage = { ...this.usage, ...nextUsage };
+    }
+    if (!candidates.length) {
+      if (!this.started && (this.usage.input_tokens || this.usage.output_tokens)) {
+        const events = this.start();
+        events[0].message.usage = { ...this.usage };
+        return events;
+      }
+      return [];
+    }
     const parts = candidates[0].content?.parts || [];
     const events = [];
-    if (!this.started) events.push(...this.start());
+    if (!this.started) {
+      events.push(...this.start());
+      events[0].message.usage = { ...this.usage };
+    }
     const thoughts = partsToText(parts, true);
     const extraThoughts = thoughts.startsWith(this.seenThoughts) ? thoughts.slice(this.seenThoughts.length) : thoughts;
     if (extraThoughts) {
@@ -493,8 +530,6 @@ export class AnthropicStreamAccumulator {
       events.push({ type: "content_block_stop", index });
     }
     if (candidates[0].finishReason) {
-      const usage = usageFromGemini(inner);
-      this.usage = { input_tokens: usage.prompt_tokens, output_tokens: usage.completion_tokens };
       if (this.stop !== "tool_use" && String(candidates[0].finishReason).toUpperCase() === "MAX_TOKENS") this.stop = "max_tokens";
     }
     return events;
@@ -517,7 +552,7 @@ export class AnthropicStreamAccumulator {
     events.push({
       type: "message_delta",
       delta: { stop_reason: this.stop, stop_sequence: null },
-      usage: { output_tokens: this.usage.output_tokens },
+      usage: this.usage,
     });
     events.push({ type: "message_stop" });
     return events;
@@ -532,11 +567,14 @@ export class StreamAccumulator {
     this.seenThoughts = "";
     this.emittedRole = false;
     this.toolIndex = 0;
+    this.usage = usageFromGemini({});
   }
 
   ingest(payload) {
     const inner = unwrapResponse(payload);
     const candidates = inner.candidates || [];
+    const nextUsage = usageFromGemini(inner);
+    if (nextUsage.prompt_tokens || nextUsage.completion_tokens || nextUsage.reasoning_tokens) this.usage = nextUsage;
     if (!candidates.length) return [];
     const parts = candidates[0].content?.parts || [];
     const events = [];
@@ -574,7 +612,7 @@ export class StreamAccumulator {
           completionId: this.completionId,
           delta: {},
           finish: finishReason(finish, this.toolIndex > 0),
-          usage: usageFromGemini(inner),
+          usage: this.usage,
         }),
       );
     }
@@ -836,6 +874,10 @@ export class ResponsesStreamAccumulator {
   ingest(payload) {
     const inner = unwrapResponse(payload);
     const candidates = inner.candidates || [];
+    const usage = usageFromGemini(inner);
+    if (usage.prompt_tokens || usage.completion_tokens || usage.total_tokens) {
+      this.usage = { input_tokens: usage.prompt_tokens, output_tokens: usage.completion_tokens, total_tokens: usage.total_tokens };
+    }
     if (!candidates.length) return [];
     const parts = candidates[0].content?.parts || [];
     const events = [];
@@ -885,8 +927,6 @@ export class ResponsesStreamAccumulator {
     }
     if (candidates[0].finishReason) {
       this.finish = finishReason(candidates[0].finishReason, this.toolCalls.length > 0);
-      const usage = usageFromGemini(inner);
-      this.usage = { input_tokens: usage.prompt_tokens, output_tokens: usage.completion_tokens, total_tokens: usage.total_tokens };
     }
     return events;
   }

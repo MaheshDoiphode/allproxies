@@ -172,13 +172,14 @@ export class AntigravityClient {
   }
 
   recordUsage(bundle, { ok = true, prompt = 0, completion = 0 } = {}) {
-    if (!bundle) return;
+    const current = (bundle && this.findAccount(accountIdOf(bundle))) || bundle || this.store.load();
+    if (!current) return;
     this.stats.requests += 1;
     if (ok) this.stats.success += 1;
     else this.stats.failed += 1;
     this.stats.prompt_tokens += Number(prompt || 0);
     this.stats.completion_tokens += Number(completion || 0);
-    this.store.save(touchAccountStats(bundle, { ok, prompt, completion }), { activate: false });
+    this.store.save(touchAccountStats(current, { ok, prompt, completion }), { activate: false });
   }
 
   async completeLogin({ code, codeVerifier, redirectUri, warm = true } = {}) {
@@ -509,7 +510,6 @@ export class AntigravityClient {
         }
       }
       if (response.status < 400) {
-        this.recordUsage(bundle, { ok: true });
         return response;
       }
       if (stream && response.stream) {
@@ -718,17 +718,20 @@ export class AntigravityClient {
     const resolved = await this.resolveRequestModel(body);
     const bundle = await this.readyBundle();
     const payload = await this.generate(openaiToUpstream(body, resolved));
-    return geminiToOpenai(payload, resolved.model);
+    const out = geminiToOpenai(payload, resolved.model);
+    this.recordUsage(this.store.load() || bundle, { ok: true, prompt: out.usage?.prompt_tokens, completion: out.usage?.completion_tokens });
+    return out;
   }
 
   async *chatCompletionsStream(body) {
     const resolved = await this.resolveRequestModel(body);
-    await this.readyBundle();
     const acc = new StreamAccumulator(resolved.model);
+    const bundle = await this.readyBundle();
     for await (const event of this.stream(openaiToUpstream(body, resolved))) {
       for (const chunk of acc.ingest(event)) yield `data: ${JSON.stringify(chunk)}\n\n`;
     }
     for (const chunk of acc.finish()) yield `data: ${JSON.stringify(chunk)}\n\n`;
+    this.recordUsage(this.store.load() || bundle, { ok: true, prompt: acc.usage?.prompt_tokens, completion: acc.usage?.completion_tokens });
     yield "data: [DONE]\n\n";
   }
 
@@ -736,12 +739,15 @@ export class AntigravityClient {
     const resolved = await this.resolveRequestModel(body);
     const bundle = await this.readyBundle();
     const payload = await this.generate(anthropicToUpstream(body, resolved));
-    return geminiToAnthropic(payload, resolved.model);
+    const out = geminiToAnthropic(payload, resolved.model);
+    this.recordUsage(this.store.load() || bundle, { ok: true, prompt: out.usage?.input_tokens, completion: out.usage?.output_tokens });
+    return out;
   }
 
   async *messagesStream(body) {
     const resolved = await this.resolveRequestModel(body);
     const acc = new AnthropicStreamAccumulator(resolved.model);
+    const bundle = await this.readyBundle();
     let opened = false;
     try {
       for await (const event of withIdlePings(this.stream(anthropicToUpstream(body, resolved)))) {
@@ -762,9 +768,13 @@ export class AntigravityClient {
       return;
     }
     if (!opened) {
-      for (const event of acc.start()) yield formatSse(event.type, event);
+      for (const event of acc.start()) {
+        if (event.message) event.message.usage = { ...acc.usage };
+        yield formatSse(event.type, event);
+      }
     }
     for (const item of acc.finish()) yield formatSse(item.type, item);
+    this.recordUsage(this.store.load() || bundle, { ok: true, prompt: acc.usage?.input_tokens, completion: acc.usage?.output_tokens });
   }
 
   async responses(body) {

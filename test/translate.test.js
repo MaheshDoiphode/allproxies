@@ -139,6 +139,9 @@ test("response maps thoughts and tools", () => {
   assert.equal(out.choices[0].message.reasoning_content, "plan");
   assert.equal(out.choices[0].message.tool_calls[0].function.name, "lookup");
   assert.equal(out.choices[0].finish_reason, "tool_calls");
+  assert.equal(out.usage.prompt_tokens, 3);
+  assert.equal(out.usage.completion_tokens, 3);
+  assert.equal(out.usage.reasoning_tokens, 1);
   assert.equal(out.usage.total_tokens, 6);
 });
 
@@ -154,6 +157,31 @@ test("anthropic response maps text and tools", () => {
   assert.equal(out.content[1].text, "hello");
   assert.equal(out.content[2].type, "tool_use");
   assert.equal(out.stop_reason, "tool_use");
+  assert.equal(out.usage.input_tokens, 3);
+  assert.equal(out.usage.output_tokens, 3);
+  assert.equal(out.usage.output_tokens_details.thinking_tokens, 1);
+});
+
+test("anthropic stream publishes input and output tokens for Copilot", () => {
+  const acc = new AnthropicStreamAccumulator("m");
+  const usageOnly = acc.ingest({
+    response: { usageMetadata: { promptTokenCount: 1200, candidatesTokenCount: 40, thoughtsTokenCount: 80, cachedContentTokenCount: 300, totalTokenCount: 1320 } },
+  });
+  assert.equal(usageOnly[0].type, "message_start");
+  assert.equal(usageOnly[0].message.usage.input_tokens, 1200);
+  const events = acc.ingest({
+    response: {
+      candidates: [{ content: { parts: [{ text: "plan", thought: true }, { text: "hi" }] }, finishReason: "STOP" }],
+      usageMetadata: { promptTokenCount: 1200, candidatesTokenCount: 40, thoughtsTokenCount: 80, cachedContentTokenCount: 300, totalTokenCount: 1320 },
+    },
+  });
+  assert.ok(events.some((item) => item.type === "content_block_delta"));
+  const done = acc.finish();
+  const delta = done.find((item) => item.type === "message_delta");
+  assert.equal(delta.usage.input_tokens, 1200);
+  assert.equal(delta.usage.output_tokens, 120);
+  assert.equal(delta.usage.cache_read_input_tokens, 300);
+  assert.equal(delta.usage.output_tokens_details.thinking_tokens, 80);
 });
 
 test("responses input becomes chat messages", () => {
