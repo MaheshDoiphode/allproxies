@@ -5,9 +5,12 @@ import { HttpError } from "../core/errors.js";
 import { sendHtml, sendJson } from "../http/server.js";
 import { safeJoin, sendFile } from "../http/static.js";
 import { OAUTH_REDIRECT_URI } from "../core/constants.js";
+import { CHATGPT_OAUTH_REDIRECT_URI } from "../core/chatgpt-constants.js";
 import { buildAuthUrl, startCallbackServer } from "../providers/antigravity/oauth.js";
+import { buildChatgptAuthUrl, startChatgptCallbackServer } from "../providers/chatgpt/oauth.js";
 import { accountIdOf, projectOf } from "../providers/antigravity/tokens.js";
 import { buildClientGuides } from "../core/guides.js";
+import { findAccountIn, mergeAccountViews, mergeModelLists } from "../router.js";
 import { AdminSessions, adminTokenFrom } from "./sessions.js";
 import { PendingLogins } from "./oauth-pending.js";
 
@@ -17,10 +20,15 @@ function cookieHeader(token) {
   return `allproxies_admin=${encodeURIComponent(token)}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${12 * 60 * 60}`;
 }
 
-export function createAdmin({ settings, client }) {
+export function createAdmin({ settings, client, chatgpt = null }) {
   const sessions = new AdminSessions();
   const pending = new PendingLogins();
+  const chatgptPending = new PendingLogins();
   const password = String(settings.adminPassword || "");
+  const pools = () => [
+    { name: "antigravity", client },
+    ...(chatgpt ? [{ name: "chatgpt", client: chatgpt }] : []),
+  ];
 
   function needsAuth() {
     return Boolean(password);
@@ -86,8 +94,18 @@ export function createAdmin({ settings, client }) {
     }
 
     if (apiPath === "/status" && req.method === "GET") {
-      const accounts = await client.listAccountViews({ refresh: url.searchParams.get("refresh") === "1" });
+      const refresh = url.searchParams.get("refresh") === "1";
+      const antigravity = await client.listAccountViews({ refresh });
+      const gpt = chatgpt ? await chatgpt.listAccountViews({ refresh }) : [];
+      const accounts = mergeAccountViews(antigravity, gpt);
       const usable = accounts.filter((item) => item && !item.disabled);
+      const stats = {
+        requests: Number(client.stats?.requests || 0) + Number(chatgpt?.stats?.requests || 0),
+        success: Number(client.stats?.success || 0) + Number(chatgpt?.stats?.success || 0),
+        failed: Number(client.stats?.failed || 0) + Number(chatgpt?.stats?.failed || 0),
+        prompt_tokens: Number(client.stats?.prompt_tokens || 0) + Number(chatgpt?.stats?.prompt_tokens || 0),
+        completion_tokens: Number(client.stats?.completion_tokens || 0) + Number(chatgpt?.stats?.completion_tokens || 0),
+      };
       sendJson(res, 200, {
         version: VERSION,
         provider: "antigravity",
@@ -95,7 +113,8 @@ export function createAdmin({ settings, client }) {
         host: settings.host,
         port: settings.port,
         active: client.accountSummary(client.activeAccount()),
-        stats: client.stats,
+        chatgpt_active: chatgpt ? chatgpt.accountSummary(chatgpt.activeAccount()) : null,
+        stats,
         accounts: {
           total: accounts.length,
           available: usable.length,
@@ -106,7 +125,10 @@ export function createAdmin({ settings, client }) {
     }
 
     if (apiPath === "/accounts" && req.method === "GET") {
-      sendJson(res, 200, await client.listAccountViews({ refresh: url.searchParams.get("refresh") === "1" }));
+      const refresh = url.searchParams.get("refresh") === "1";
+      const antigravity = await client.listAccountViews({ refresh });
+      const gpt = chatgpt ? await chatgpt.listAccountViews({ refresh }) : [];
+      sendJson(res, 200, mergeAccountViews(antigravity, gpt));
       return true;
     }
 
@@ -141,7 +163,7 @@ export function createAdmin({ settings, client }) {
           },
           (err) => pending.finish(rec.state, { error: err.message || String(err) }),
         );
-        sendJson(res, 200, { state: rec.state, authorize_url: authorizeUrl });
+        sendJson(res, 200, { state: rec.state, authorize_url: authorizeUrl, provider: "antigravity" });
       } catch (err) {
         pending.finish(rec.state, { error: err.message || String(err) });
         sendJson(res, 500, { error: { message: err.message || "Could not start login" } });
@@ -149,9 +171,52 @@ export function createAdmin({ settings, client }) {
       return true;
     }
 
+    if (apiPath === "/accounts/login-chatgpt" && req.method === "POST") {
+      if (!chatgpt) {
+        sendJson(res, 400, { error: { message: "ChatGPT provider is not configured" } });
+        return true;
+      }
+      if ([...chatgptPending.items.values()].some((item) => !item.done)) {
+        sendJson(res, 409, { error: { message: "A ChatGPT login is already in progress" } });
+        return true;
+      }
+      const rec = chatgptPending.create({ redirectUri: CHATGPT_OAUTH_REDIRECT_URI });
+      try {
+        const { ready, code: codePromise, close } = startChatgptCallbackServer(rec.state);
+        rec.closer = close;
+        await ready;
+        const authorizeUrl = buildChatgptAuthUrl({
+          state: rec.state,
+          codeChallenge: rec.challenge,
+          redirectUri: CHATGPT_OAUTH_REDIRECT_URI,
+        });
+        codePromise.then(
+          async (code) => {
+            try {
+              const bundle = await chatgpt.completeLogin({
+                code,
+                codeVerifier: rec.verifier,
+                redirectUri: CHATGPT_OAUTH_REDIRECT_URI,
+                warm: true,
+              });
+              chatgptPending.finish(rec.state, { account: chatgpt.accountSummary(bundle) });
+            } catch (err) {
+              chatgptPending.finish(rec.state, { error: err.message || String(err) });
+            }
+          },
+          (err) => chatgptPending.finish(rec.state, { error: err.message || String(err) }),
+        );
+        sendJson(res, 200, { state: rec.state, authorize_url: authorizeUrl, provider: "chatgpt" });
+      } catch (err) {
+        chatgptPending.finish(rec.state, { error: err.message || String(err) });
+        sendJson(res, 500, { error: { message: err.message || "Could not start ChatGPT login" } });
+      }
+      return true;
+    }
+
     if (apiPath.startsWith("/accounts/login/") && apiPath.endsWith("/poll") && req.method === "GET") {
       const state = decodeURIComponent(apiPath.slice("/accounts/login/".length, -"/poll".length));
-      const rec = pending.get(state);
+      const rec = pending.get(state) || chatgptPending.get(state);
       if (!rec) {
         sendJson(res, 404, { error: { message: "Unknown login" } });
         return true;
@@ -166,17 +231,20 @@ export function createAdmin({ settings, client }) {
       const action = String(body.action || "");
       let count = 0;
       for (const id of ids) {
+        const match = findAccountIn(id, pools());
+        if (!match) continue;
+        const target = accountIdOf(match.account) || id;
         if (action === "enable") {
-          client.setEnabled(id, true);
+          match.client.setEnabled(target, true);
           count += 1;
         } else if (action === "disable") {
-          client.setEnabled(id, false);
+          match.client.setEnabled(target, false);
           count += 1;
         } else if (action === "delete") {
-          await client.removeAccount(id);
+          await match.client.removeAccount(target);
           count += 1;
         } else if (action === "refresh") {
-          await client.refreshAccountQuotas(id);
+          await match.client.refreshAccountQuotas(target);
           count += 1;
         }
       }
@@ -185,45 +253,50 @@ export function createAdmin({ settings, client }) {
     }
 
     const accountMatch = apiPath.match(/^\/accounts\/([^/]+)(?:\/(refresh|enable|disable))?$/);
-    if (accountMatch && accountMatch[1] !== "login" && accountMatch[1] !== "batch") {
+    if (accountMatch && !["login", "login-chatgpt", "batch"].includes(accountMatch[1])) {
       const id = decodeURIComponent(accountMatch[1]);
       const extra = accountMatch[2];
+      const match = findAccountIn(id, pools());
+      if (!match) throw new HttpError(404, "Account not found");
+      const target = accountIdOf(match.account) || id;
       if (req.method === "GET" && !extra) {
-        const found = client.findAccount(id);
-        if (!found) throw new HttpError(404, "Account not found");
-        sendJson(res, 200, client.accountSummary(found));
+        sendJson(res, 200, match.client.accountSummary(match.account));
         return true;
       }
       if (req.method === "DELETE") {
-        await client.removeAccount(id);
+        await match.client.removeAccount(target);
         sendJson(res, 200, { success: true });
         return true;
       }
       if (req.method === "PUT") {
         const enabled = req.body?.enabled;
-        if (typeof enabled === "boolean") client.setEnabled(id, enabled);
-        if (req.body?.active) await client.switchAccount(id);
-        sendJson(res, 200, client.accountSummary(client.findAccount(id)));
+        if (typeof enabled === "boolean") match.client.setEnabled(target, enabled);
+        if (req.body?.active) await match.client.switchAccount(target);
+        sendJson(res, 200, match.client.accountSummary(match.client.findAccount(target)));
         return true;
       }
       if (req.method === "POST" && extra === "refresh") {
-        sendJson(res, 200, { success: true, account: await client.refreshAccountQuotas(id) });
+        sendJson(res, 200, { success: true, account: await match.client.refreshAccountQuotas(target) });
         return true;
       }
       if (req.method === "POST" && extra === "enable") {
-        sendJson(res, 200, client.accountSummary(client.setEnabled(id, true)));
+        sendJson(res, 200, match.client.accountSummary(match.client.setEnabled(target, true)));
         return true;
       }
       if (req.method === "POST" && extra === "disable") {
-        sendJson(res, 200, client.accountSummary(client.setEnabled(id, false)));
+        sendJson(res, 200, match.client.accountSummary(match.client.setEnabled(target, false)));
         return true;
       }
     }
 
     if (apiPath === "/models" && req.method === "GET") {
       try {
-        sendJson(res, 200, await client.fetchModels());
-      } catch (err) {
+        const [antigravityModels, chatgptModels] = await Promise.all([
+          client.fetchModels().catch(() => []),
+          chatgpt ? chatgpt.fetchModels().catch(() => []) : Promise.resolve([]),
+        ]);
+        sendJson(res, 200, mergeModelLists(antigravityModels, chatgptModels));
+      } catch {
         sendJson(res, 200, []);
       }
       return true;
@@ -231,15 +304,30 @@ export function createAdmin({ settings, client }) {
 
     if (apiPath === "/guides" && req.method === "GET") {
       const prefixed = url.searchParams.get("prefixed") === "1";
-      let models = [];
+      let antigravityModels = [];
+      let chatgptModels = [];
       try {
-        models = Array.isArray(client.modelsCache?.models) && client.modelsCache.models.length
+        antigravityModels = Array.isArray(client.modelsCache?.models) && client.modelsCache.models.length
           ? client.modelsCache.models
           : await client.fetchModels();
       } catch {
-        models = [];
+        antigravityModels = [];
       }
-      sendJson(res, 200, buildClientGuides({ models, settings, provider: "antigravity", prefixed }));
+      try {
+        chatgptModels = chatgpt
+          ? (Array.isArray(chatgpt.modelsCache?.models) && chatgpt.modelsCache.models.length
+            ? chatgpt.modelsCache.models
+            : await chatgpt.fetchModels())
+          : [];
+      } catch {
+        chatgptModels = [];
+      }
+      sendJson(res, 200, buildClientGuides({
+        models: mergeModelLists(antigravityModels, chatgptModels),
+        settings,
+        provider: "antigravity",
+        prefixed,
+      }));
       return true;
     }
 
@@ -251,6 +339,7 @@ export function createAdmin({ settings, client }) {
     handle,
     sessions,
     pending,
+    chatgptPending,
     authorized,
     needsAuth,
     accountIdOf,

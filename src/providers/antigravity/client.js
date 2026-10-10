@@ -135,6 +135,7 @@ export class AntigravityClient {
       id: accountIdOf(bundle),
       email: bundle.email || null,
       project: projectOf(bundle),
+      provider: "antigravity",
       expired: isExpired(bundle),
       enabled: bundle.enabled !== false,
       disabled,

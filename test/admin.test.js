@@ -70,3 +70,38 @@ test("enable disable and batch skip disabled accounts", async () => {
     await api.close();
   }
 });
+
+test("dashboard lists chatgpt accounts and starts chatgpt login", async () => {
+  const dir = tempDir();
+  const tokenPath = path.join(dir, "chatgpt-tokens.db");
+  const { TokenStore, createChatgptBundle } = await import("../src/providers/chatgpt/tokens.js");
+  const { ChatgptClient } = await import("../src/providers/chatgpt/client.js");
+  new TokenStore(tokenPath).save(createChatgptBundle({
+    access_token: "gpt-access",
+    refresh_token: "gpt-refresh",
+    expires_at: 4_000_000_000,
+    email: "gpt@example.com",
+    account_id: "acct-1",
+    project_id: "acct-1",
+    managed_project_id: "acct-1",
+    plan: "free",
+  }));
+  const chatgpt = new ChatgptClient(testSettings(dir, { chatgptTokenPath: tokenPath, liveModels: false }));
+  const api = await startApi(dir, { chatgpt });
+  try {
+    const status = await request(api.url, "/admin/api/status");
+    assert.equal(status.status, 200);
+    const emails = status.json.items.map((item) => item.email);
+    assert.ok(emails.includes("user@example.com"));
+    assert.ok(emails.includes("gpt@example.com"));
+    const gpt = status.json.items.find((item) => item.email === "gpt@example.com");
+    assert.equal(gpt.provider, "chatgpt");
+    const login = await request(api.url, "/admin/api/accounts/login-chatgpt", { method: "POST" });
+    assert.equal(login.status, 200);
+    assert.match(login.json.authorize_url, /auth\.openai\.com/);
+    assert.equal(login.json.provider, "chatgpt");
+    await request(`http://127.0.0.1:1455/auth/callback?state=${encodeURIComponent(login.json.state)}&error=access_denied`);
+  } finally {
+    await api.close();
+  }
+});

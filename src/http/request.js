@@ -66,7 +66,7 @@ export async function request(url, options = {}) {
   throw new Error(`Too many redirects for ${url}`);
 }
 
-export async function requestJson(url, { method = "POST", headers = {}, json, form, timeoutMs } = {}) {
+export async function requestJson(url, { method = "GET", headers = {}, json, form, timeoutMs } = {}) {
   const nextHeaders = { ...headers };
   let body;
   if (form) {
@@ -102,14 +102,20 @@ export async function* iterateSse(readable, { onFirstBytes } = {}) {
       const raw = buffer.slice(0, sep);
       const match = buffer.slice(sep).match(/^\r?\n\r?\n/);
       buffer = buffer.slice(sep + (match ? match[0].length : 2));
-      const data = raw
-        .split(/\r?\n/)
-        .filter((line) => line.startsWith("data:"))
-        .map((line) => line.slice(5).trimStart())
-        .join("\n");
+      let eventName = "message";
+      const dataLines = [];
+      for (const line of raw.split(/\r?\n/)) {
+        if (line.startsWith("event:")) eventName = line.slice(6).trim();
+        else if (line.startsWith("data:")) dataLines.push(line.slice(5).trimStart());
+      }
+      const data = dataLines.join("\n");
       if (!data || data === "[DONE]") continue;
       try {
-        yield JSON.parse(data);
+        const parsed = JSON.parse(data);
+        if (parsed && typeof parsed === "object" && !parsed.type && eventName && eventName !== "message") {
+          parsed.type = eventName;
+        }
+        yield parsed;
       } catch {
         // ignore malformed SSE frames
       }

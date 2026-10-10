@@ -81,6 +81,7 @@
           <h2>Account pool</h2>
           <div class="card-actions">
             <button type="button" class="btn btn-ghost" id="refreshBtn">Refresh quotas</button>
+            <button type="button" class="btn btn-ghost" id="addChatgptBtn">Add ChatGPT account</button>
             <button type="button" class="btn btn-primary" id="addAccountBtn">Add Google account</button>
           </div>
         </div>
@@ -101,6 +102,7 @@
           </select>
         </div>
         <p id="loginHint" class="muted hidden">Waiting for Google… pick the other Pro account in the new tab.</p>
+        <p id="chatgptLoginHint" class="muted hidden">Waiting for ChatGPT… finish sign-in in the new tab.</p>
         <div id="accountsList"></div>
       </section>
 
@@ -164,6 +166,6 @@
       </section>
     </div>
   </div>
-  <script src="/admin/app.js?v=setup5"></script>
+  <script src="/admin/app.js?v=setup6"></script>
 </body>
 </html>

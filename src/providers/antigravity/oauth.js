@@ -119,7 +119,7 @@ export async function fetchEmail(accessToken, timeoutMs) {
   return response.parsed?.email || null;
 }
 
-export function startCallbackServer(expectedState, { port = OAUTH_CALLBACK_PORT, timeoutMs = 180_000 } = {}) {
+export function startCallbackServer(expectedState, { port = OAUTH_CALLBACK_PORT, timeoutMs = 180_000, path = "/oauth-callback" } = {}) {
   let settled = false;
   let finish;
   const code = new Promise((resolve, reject) => {
@@ -146,7 +146,7 @@ export function startCallbackServer(expectedState, { port = OAUTH_CALLBACK_PORT,
       res.end();
       return;
     }
-    if (url.pathname.replace(/\/$/, "") !== "/oauth-callback") {
+    if (url.pathname.replace(/\/$/, "") !== path) {
       res.writeHead(404);
       res.end();
       return;

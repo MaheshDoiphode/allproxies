@@ -115,7 +115,7 @@
       return;
     }
     root.innerHTML = rows.map((a) => {
-      const id = a.id;
+      const id = `${a.provider || "antigravity"}:${a.id}`;
       const checked = selected.has(id) ? "checked" : "";
       return `<article class="account-card ${selected.has(id) ? "selected" : ""}" data-id="${escapeHtml(id)}">
         <div class="account-head">
@@ -126,7 +126,8 @@
             <div class="account-meta">
               ${a.active ? '<span class="badge ok">last used</span>' : ""}
               ${statusBadge(a)}
-              ${projectBadge(a)}
+              ${a.provider === "chatgpt" ? `<span class="badge">${escapeHtml(a.plan || "chatgpt")}</span>` : projectBadge(a)}
+              <span class="badge">${escapeHtml(a.provider || "antigravity")}</span>
               <span class="badge">${a.request_count || 0} req</span>
             </div>
           </div>
@@ -253,9 +254,10 @@
     }
   }
 
-  async function startLogin() {
-    const rec = await api("/accounts/login", { method: "POST" });
-    $("loginHint").classList.remove("hidden");
+  async function startLogin(path, hintId, okMessage) {
+    const rec = await api(path, { method: "POST" });
+    const hint = $(hintId);
+    if (hint) hint.classList.remove("hidden");
     window.open(rec.authorize_url, "_blank", "noopener");
     clearInterval(pollTimer);
     pollTimer = setInterval(async () => {
@@ -263,14 +265,14 @@
         const poll = await api("/accounts/login/" + encodeURIComponent(rec.state) + "/poll");
         if (!poll.done) return;
         clearInterval(pollTimer);
-        $("loginHint").classList.add("hidden");
+        if (hint) hint.classList.add("hidden");
         if (poll.error) toast(poll.error);
-        else toast("Account added");
+        else toast(okMessage);
         await loadAll(false);
         loadAll(true).catch(() => {});
       } catch (err) {
         clearInterval(pollTimer);
-        $("loginHint").classList.add("hidden");
+        if (hint) hint.classList.add("hidden");
         toast(err.message);
       }
     }, 1500);
@@ -322,13 +324,14 @@
     location.reload();
   });
 
-  $("addAccountBtn")?.addEventListener("click", () => startLogin().catch((err) => toast(err.message)));
+  $("addAccountBtn")?.addEventListener("click", () => startLogin("/accounts/login", "loginHint", "Google account added").catch((err) => toast(err.message)));
+  $("addChatgptBtn")?.addEventListener("click", () => startLogin("/accounts/login-chatgpt", "chatgptLoginHint", "ChatGPT account added").catch((err) => toast(err.message)));
   $("refreshBtn")?.addEventListener("click", () => loadAll(true).catch((err) => toast(err.message)));
   $("filterSearch")?.addEventListener("input", renderAccounts);
   $("filterStatus")?.addEventListener("change", renderAccounts);
   $("selectAll")?.addEventListener("change", (ev) => {
     selected.clear();
-    if (ev.target.checked) filtered().forEach((a) => selected.add(a.id));
+    if (ev.target.checked) filtered().forEach((a) => selected.add(`${a.provider || "antigravity"}:${a.id}`));
     renderAccounts();
   });
 
@@ -370,7 +373,7 @@
       if (btn.dataset.act === "refresh") await api("/accounts/" + encodeURIComponent(id) + "/refresh", { method: "POST" });
       if (btn.dataset.act === "use") await api("/accounts/" + encodeURIComponent(id), { method: "PUT", body: { active: true } });
       if (btn.dataset.act === "toggle") {
-        const acc = accounts.find((a) => a.id === id);
+        const acc = accounts.find((a) => `${a.provider || "antigravity"}:${a.id}` === id || a.id === id);
         await api("/accounts/" + encodeURIComponent(id), { method: "PUT", body: { enabled: acc?.enabled === false } });
       }
       if (btn.dataset.act === "delete") {

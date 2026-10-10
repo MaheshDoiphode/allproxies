@@ -3,6 +3,7 @@ import { VERSION } from "./core/constants.js";
 import { HttpError } from "./core/errors.js";
 import { createServer, flush, readBody, sendJson } from "./http/server.js";
 import { projectOf } from "./providers/antigravity/tokens.js";
+import { mergeAccountViews, mergeModelLists, pickClient } from "./router.js";
 
 function pathnameOf(req) {
   return new URL(req.url || "/", "http://localhost").pathname;
@@ -92,8 +93,8 @@ async function readJson(req) {
   }
 }
 
-export function createApp({ settings, client }) {
-  const admin = createAdmin({ settings, client });
+export function createApp({ settings, client, chatgpt = null }) {
+  const admin = createAdmin({ settings, client, chatgpt });
   return createServer(async (req, res) => {
     const url = new URL(req.url || "/", "http://localhost");
     const path = url.pathname;
@@ -103,16 +104,29 @@ export function createApp({ settings, client }) {
     if (await admin.handle(req, res, url)) return;
     if (req.method === "GET" && path === "/health") {
       const accounts = client.accounts();
+      const chatgptAccounts = chatgpt ? chatgpt.accounts() : [];
       const bundle = client.activeAccount() || client.store.load();
+      const gpt = chatgpt?.activeAccount?.() || chatgpt?.store?.load?.();
       sendJson(res, 200, {
         status: "ok",
         version: VERSION,
         provider: "antigravity",
-        logged_in: Boolean(bundle?.refresh_token || accounts.length),
-        email: bundle?.email || null,
+        logged_in: Boolean(bundle?.refresh_token || accounts.length || gpt?.refresh_token || chatgptAccounts.length),
+        email: bundle?.email || gpt?.email || null,
         project: projectOf(bundle),
         endpoint: client.baseUrl,
-        accounts: accounts.map((item) => client.accountSummary(item)),
+        chatgpt: chatgpt
+          ? {
+              logged_in: Boolean(gpt?.refresh_token || chatgptAccounts.length),
+              email: gpt?.email || null,
+              endpoint: chatgpt.baseUrl,
+              accounts: chatgptAccounts.length,
+            }
+          : null,
+        accounts: mergeAccountViews(
+          accounts.map((item) => client.accountSummary(item)),
+          chatgptAccounts.map((item) => chatgpt.accountSummary(item)),
+        ),
       });
       return;
     }
@@ -125,14 +139,18 @@ export function createApp({ settings, client }) {
     }
 
     if (req.method === "GET" && path === "/v1/models") {
-      const models = await client.fetchModels();
+      const [antigravityModels, chatgptModels] = await Promise.all([
+        client.fetchModels().catch(() => []),
+        chatgpt ? chatgpt.fetchModels().catch(() => []) : Promise.resolve([]),
+      ]);
+      const models = mergeModelLists(antigravityModels, chatgptModels);
       sendJson(res, 200, {
         object: "list",
         data: models.map((model) => ({
           id: model.id,
           object: "model",
           created: 0,
-          owned_by: "antigravity",
+          owned_by: model.family === "gpt" ? "chatgpt" : "antigravity",
           name: model.name,
           family: model.family,
           context_window: model.context,
@@ -150,17 +168,19 @@ export function createApp({ settings, client }) {
 
     if (req.method === "POST" && (path === "/v1/chat/completions" || path === "/chat/completions" || path === "/openai/v1/chat/completions")) {
       const body = req.body || await readJson(req);
+      const target = pickClient(body, { client, chatgpt });
       if (settings.debugRequests) console.log(`[req] ${path} model=${body.model} stream=${Boolean(body.stream)} effort=${body.reasoning_effort || body.reasoning?.effort || body.output_config?.effort || ""}`);
       if (isStreaming(body)) {
-        await pipeSse(res, client.chatCompletionsStream(body));
+        await pipeSse(res, target.chatCompletionsStream(body));
         return;
       }
-      sendJson(res, 200, await client.chatCompletions(body));
+      sendJson(res, 200, await target.chatCompletions(body));
       return;
     }
 
     if (req.method === "POST" && (path === "/v1/messages" || path === "/messages" || path === "/anthropic/v1/messages")) {
       const body = req.body || await readJson(req);
+      const target = pickClient(body, { client, chatgpt });
       if (settings.debugRequests) {
         const thinking = body.thinking && typeof body.thinking === "object" ? `${body.thinking.type || ""}/${body.thinking.effort || body.thinking.budget_tokens || ""}` : "";
         const tools = Array.isArray(body.tools) ? body.tools.length : 0;
@@ -168,30 +188,43 @@ export function createApp({ settings, client }) {
         console.log(`[req] ${path} model=${body.model} stream=${Boolean(body.stream)} effort=${body.output_config?.effort || ""} thinking=${thinking} tools=${tools} parts=${kinds.join(",")}`);
       }
       if (isStreaming(body)) {
-        await pipeSse(res, client.messagesStream(body));
+        await pipeSse(res, target.messagesStream(body));
         return;
       }
-      sendJson(res, 200, await client.messages(body));
+      sendJson(res, 200, await target.messages(body));
       return;
     }
 
     if (req.method === "POST" && (path === "/v1/responses" || path === "/responses" || path === "/openai/v1/responses")) {
       const body = req.body || await readJson(req);
+      const target = pickClient(body, { client, chatgpt });
       if (isStreaming(body)) {
-        await pipeSse(res, client.responsesStream(body));
+        await pipeSse(res, target.responsesStream(body));
         return;
       }
-      sendJson(res, 200, await client.responses(body));
+      sendJson(res, 200, await target.responses(body));
       return;
     }
 
     const responseGet = path.match(/^\/(?:openai\/)?v1\/responses\/([^/]+)$/) || path.match(/^\/responses\/([^/]+)$/);
     if (responseGet && req.method === "GET") {
-      sendJson(res, 200, client.getResponse(decodeURIComponent(responseGet[1])));
+      const id = decodeURIComponent(responseGet[1]);
+      try {
+        sendJson(res, 200, client.getResponse(id));
+      } catch (err) {
+        if (!chatgpt) throw err;
+        sendJson(res, 200, chatgpt.getResponse(id));
+      }
       return;
     }
     if (responseGet && req.method === "DELETE") {
-      sendJson(res, 200, client.deleteResponse(decodeURIComponent(responseGet[1])));
+      const id = decodeURIComponent(responseGet[1]);
+      try {
+        sendJson(res, 200, client.deleteResponse(id));
+      } catch (err) {
+        if (!chatgpt) throw err;
+        sendJson(res, 200, chatgpt.deleteResponse(id));
+      }
       return;
     }
 
@@ -213,8 +246,8 @@ export function createApp({ settings, client }) {
   });
 }
 
-export function startServer({ settings, client }) {
-  const server = createApp({ settings, client });
+export function startServer({ settings, client, chatgpt = null }) {
+  const server = createApp({ settings, client, chatgpt });
   return new Promise((resolve) => {
     server.listen(settings.port, settings.host, () => {
       console.log(`allproxies listening on http://${settings.host}:${settings.port}`);
