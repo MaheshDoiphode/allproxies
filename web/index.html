@@ -1,0 +1,169 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>allproxies</title>
+  <script>
+    (function () {
+      try {
+        var pref = localStorage.getItem("ap_theme") || "system";
+        var dark = pref === "dark" || (pref !== "light" && window.matchMedia && window.matchMedia("(prefers-color-scheme: dark)").matches);
+        document.documentElement.classList.toggle("dark", dark);
+      } catch (e) {}
+    })();
+  </script>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600;700&family=Geist+Mono:wght@400;500&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="/admin/styles.css" />
+</head>
+<body>
+  <div id="loginPage" class="login-wrap hidden">
+    <header class="topbar">
+      <div class="brand">allproxies</div>
+      <button type="button" class="icon-btn" data-theme-toggle>Theme</button>
+    </header>
+    <main class="login-main">
+      <form id="loginForm" class="login-box">
+        <h1>Dashboard</h1>
+        <p class="muted">Local Antigravity proxy. Sign in to manage accounts.</p>
+        <label class="field">
+          <span>Password</span>
+          <input type="password" id="pwdField" autocomplete="current-password" />
+        </label>
+        <button type="submit" class="btn btn-primary">Open dashboard</button>
+        <p id="loginError" class="error hidden"></p>
+      </form>
+    </main>
+  </div>
+
+  <div id="mainPage" class="hidden">
+    <header class="topbar">
+      <div class="brand">allproxies</div>
+      <nav class="tabs">
+        <button type="button" class="tab active" data-tab="accounts">Accounts</button>
+        <button type="button" class="tab" data-tab="models">Models</button>
+        <button type="button" class="tab" data-tab="setup">Setup</button>
+      </nav>
+      <div class="top-actions">
+        <button type="button" class="icon-btn" data-theme-toggle>Theme</button>
+        <button type="button" class="btn btn-ghost" id="logoutBtn">Lock</button>
+      </div>
+    </header>
+
+    <div class="container">
+      <div class="stats-grid">
+        <div class="stat-card">
+          <div class="stat-title">Accounts</div>
+          <div class="stat-value" id="statAccounts">0</div>
+          <div class="stat-sub" id="statAvailable">0 available</div>
+        </div>
+        <div class="stat-card">
+          <div class="stat-title">Requests</div>
+          <div class="stat-value" id="statRequests">0</div>
+          <div class="stat-sub" id="statTokens">0 tokens</div>
+        </div>
+        <div class="stat-card">
+          <div class="stat-title">Success</div>
+          <div class="stat-value" id="statSuccess">0</div>
+          <div class="stat-sub" id="statSuccessRate">0%</div>
+        </div>
+        <div class="stat-card">
+          <div class="stat-title">Failed</div>
+          <div class="stat-value danger" id="statFailed">0</div>
+          <div class="stat-sub" id="statActive">no active account</div>
+        </div>
+      </div>
+
+      <section id="tabAccounts" class="card">
+        <div class="card-header">
+          <h2>Account pool</h2>
+          <div class="card-actions">
+            <button type="button" class="btn btn-ghost" id="refreshBtn">Refresh quotas</button>
+            <button type="button" class="btn btn-primary" id="addAccountBtn">Add Google account</button>
+          </div>
+        </div>
+        <div class="toolbar">
+          <label class="check"><input type="checkbox" id="selectAll" /> Select all</label>
+          <div id="batchBar" class="batch hidden">
+            <button type="button" class="btn btn-sm" data-batch="enable">Enable</button>
+            <button type="button" class="btn btn-sm" data-batch="disable">Disable</button>
+            <button type="button" class="btn btn-sm" data-batch="refresh">Refresh</button>
+            <button type="button" class="btn btn-sm danger" data-batch="delete">Delete</button>
+          </div>
+          <input type="search" id="filterSearch" placeholder="Filter email" />
+          <select id="filterStatus">
+            <option value="all">All</option>
+            <option value="enabled">Enabled</option>
+            <option value="disabled">Disabled</option>
+            <option value="limited">Limited</option>
+          </select>
+        </div>
+        <p id="loginHint" class="muted hidden">Waiting for Google… pick the other Pro account in the new tab.</p>
+        <div id="accountsList"></div>
+      </section>
+
+      <section id="tabModels" class="card hidden">
+        <div class="card-header">
+          <h2>Models</h2>
+        </div>
+        <div id="modelsList" class="table-wrap"></div>
+      </section>
+
+      <section id="tabSetup" class="card hidden">
+        <div class="card-header">
+          <h2>Client setup</h2>
+          <div class="card-actions">
+            <label class="check"><input type="checkbox" id="guidePrefixed" /> Prefix ids (Gemini:…)</label>
+            <button type="button" class="btn btn-ghost" id="guideRefresh">Reload snippets</button>
+          </div>
+        </div>
+        <p class="muted" id="guideIntro">Copy these into the tool you already use. The model list is generated from this proxy.</p>
+        <div class="setup-grid">
+          <article class="setup-card">
+            <div class="setup-head">
+              <h3>VS Code Copilot Chat</h3>
+              <div class="setup-actions">
+                <select id="vscodeApiType">
+                  <option value="messages" selected>messages</option>
+                  <option value="completions">openai (chat completions)</option>
+                  <option value="responses">responses</option>
+                </select>
+                <button type="button" class="btn btn-sm" data-copy="vscodeJson">Copy JSON</button>
+              </div>
+            </div>
+            <p class="muted">Ctrl/Cmd+P → <code>Chat: Open Language Models (JSON)</code>. Merge this object into the array.</p>
+            <pre class="code-block" id="vscodeJson"></pre>
+          </article>
+          <article class="setup-card">
+            <div class="setup-head">
+              <h3>Claude Code</h3>
+              <button type="button" class="btn btn-sm" data-copy="claudeJson">Copy JSON</button>
+            </div>
+            <p class="muted">Paste into <code>~/.claude/settings.json</code> (or a project <code>.claude/settings.json</code>).</p>
+            <pre class="code-block" id="claudeJson"></pre>
+          </article>
+          <article class="setup-card">
+            <div class="setup-head">
+              <h3>Codex</h3>
+              <button type="button" class="btn btn-sm" data-copy="codexToml">Copy TOML</button>
+            </div>
+            <p class="muted">Append to <code>~/.codex/config.toml</code>. Set <code>OPENAI_API_KEY</code> to the same token as this proxy.</p>
+            <pre class="code-block" id="codexToml"></pre>
+          </article>
+          <article class="setup-card">
+            <div class="setup-head">
+              <h3>Base URLs</h3>
+              <button type="button" class="btn btn-sm" data-copy="endpointsJson">Copy JSON</button>
+            </div>
+            <p class="muted">Any OpenAI- or Anthropic-compatible client. Same models, pick the path your tool already speaks.</p>
+            <pre class="code-block" id="endpointsJson"></pre>
+          </article>
+        </div>
+      </section>
+    </div>
+  </div>
+  <script src="/admin/app.js?v=setup5"></script>
+</body>
+</html>

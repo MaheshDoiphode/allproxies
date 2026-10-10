@@ -1,0 +1,120 @@
+import http from "node:http";
+import https from "node:https";
+
+function requestOnce(url, { method = "GET", headers = {}, body, timeoutMs = 30_000, stream = false } = {}) {
+  return new Promise((resolve, reject) => {
+    const parsed = new URL(url);
+    const lib = parsed.protocol === "http:" ? http : https;
+    const req = lib.request(
+      {
+        protocol: parsed.protocol,
+        hostname: parsed.hostname,
+        port: parsed.port || (parsed.protocol === "http:" ? 80 : 443),
+        path: `${parsed.pathname}${parsed.search}`,
+        method,
+        headers,
+      },
+      (res) => {
+        if (stream) {
+          resolve({
+            status: res.statusCode || 0,
+            headers: res.headers,
+            body: "",
+            stream: res,
+          });
+          return;
+        }
+        const chunks = [];
+        res.on("data", (chunk) => chunks.push(chunk));
+        res.on("end", () => {
+          const raw = Buffer.concat(chunks).toString("utf8");
+          resolve({
+            status: res.statusCode || 0,
+            headers: res.headers,
+            body: raw,
+            json() {
+              return raw ? JSON.parse(raw) : {};
+            },
+          });
+        });
+      },
+    );
+    req.on("error", reject);
+    req.setTimeout(timeoutMs, () => {
+      req.destroy(new Error(`Request timed out after ${timeoutMs}ms`));
+    });
+    req.on("timeout", () => {
+      req.destroy(new Error(`Request timed out after ${timeoutMs}ms`));
+    });
+    if (body) req.write(body);
+    req.end();
+  });
+}
+
+export async function request(url, options = {}) {
+  const maxRedirects = options.maxRedirects ?? 5;
+  let current = url;
+  for (let i = 0; i <= maxRedirects; i += 1) {
+    const response = await requestOnce(current, options);
+    const loc = response.headers.location;
+    if (response.status >= 300 && response.status < 400 && loc && !options.stream) {
+      current = new URL(loc, current).toString();
+      continue;
+    }
+    return response;
+  }
+  throw new Error(`Too many redirects for ${url}`);
+}
+
+export async function requestJson(url, { method = "POST", headers = {}, json, form, timeoutMs } = {}) {
+  const nextHeaders = { ...headers };
+  let body;
+  if (form) {
+    body = new URLSearchParams(form).toString();
+    nextHeaders["Content-Type"] = nextHeaders["Content-Type"] || "application/x-www-form-urlencoded";
+  } else if (json !== undefined) {
+    body = JSON.stringify(json);
+    nextHeaders["Content-Type"] = nextHeaders["Content-Type"] || "application/json";
+  }
+  if (body) nextHeaders["Content-Length"] = Buffer.byteLength(body);
+  const response = await request(url, { method, headers: nextHeaders, body, timeoutMs });
+  let parsed;
+  try {
+    parsed = response.body ? JSON.parse(response.body) : {};
+  } catch {
+    parsed = undefined;
+  }
+  return { ...response, parsed };
+}
+
+export async function* iterateSse(readable, { onFirstBytes } = {}) {
+  let buffer = "";
+  let sawBytes = false;
+  const flush = function* (chunk) {
+    const text = Buffer.isBuffer(chunk) ? chunk.toString("utf8") : String(chunk);
+    if (!sawBytes) {
+      sawBytes = true;
+      onFirstBytes?.(text);
+    }
+    buffer += text;
+    let sep;
+    while ((sep = buffer.search(/\r?\n\r?\n/)) >= 0) {
+      const raw = buffer.slice(0, sep);
+      const match = buffer.slice(sep).match(/^\r?\n\r?\n/);
+      buffer = buffer.slice(sep + (match ? match[0].length : 2));
+      const data = raw
+        .split(/\r?\n/)
+        .filter((line) => line.startsWith("data:"))
+        .map((line) => line.slice(5).trimStart())
+        .join("\n");
+      if (!data || data === "[DONE]") continue;
+      try {
+        yield JSON.parse(data);
+      } catch {
+        // ignore malformed SSE frames
+      }
+    }
+  };
+  for await (const chunk of readable) yield* flush(chunk);
+  if (buffer.trim()) yield* flush("\n\n");
+}

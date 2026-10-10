@@ -1,0 +1,13 @@
+node_modules/
+.env
+data/*.json
+data/*.db
+data/*.db-wal
+data/*.db-shm
+!data/models.json
+*.log
+.DS_Store
+.venv/
+__pycache__/
+.pytest_cache/
+data/

@@ -1,0 +1,20 @@
+{
+  "name": "allproxies",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Local multi-provider AI API proxies. First provider: Google Antigravity.",
+  "type": "module",
+  "engines": {
+    "node": ">=22.5"
+  },
+  "bin": {
+    "allproxies": "./src/cli.js"
+  },
+  "scripts": {
+    "start": "node src/cli.js serve",
+    "login": "node src/cli.js login",
+    "status": "node src/cli.js status",
+    "models": "node src/cli.js models",
+    "test": "node --test --test-concurrency=1 test/*.test.js"
+  }
+}
