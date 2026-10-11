@@ -58,6 +58,8 @@ export function createModel(raw) {
     efforts: Array.isArray(raw.efforts) ? raw.efforts : [],
     variants: raw.variants && typeof raw.variants === "object" ? raw.variants : {},
     preferred: raw.preferred || id,
+    provider: raw.provider || null,
+    supports_image_output: Boolean(raw.supports_image_output),
   };
 }
 
@@ -164,7 +166,7 @@ export function mergeCatalog(staticModels, liveModels) {
   return [...byId.values()].sort((a, b) => a.id.localeCompare(b.id));
 }
 
-const KNOWN_PREFIXES = ["google", "antigravity", "gemini", "claude", "gpt", "openai", "kiro", "bedrock"];
+const KNOWN_PREFIXES = ["google", "antigravity", "gemini", "claude", "gpt", "openai", "kiro", "bedrock", "vertex", "google-vertex"];
 
 export function stripModelPrefix(requested) {
   let raw = String(requested || "").trim();
@@ -226,6 +228,7 @@ export function collapseEffortVariants(models) {
       id: groupKey,
       name: prettyModelName(model.name, groupKey),
       family: model.family,
+      provider: model.provider || null,
       context: model.context,
       output: model.output,
       supports_thinking: Boolean(model.supports_thinking),
@@ -237,8 +240,15 @@ export function collapseEffortVariants(models) {
       recommended: Boolean(model.recommended),
       source: model.source,
       efforts: new Set(),
+      listedEfforts: [],
       variants: {},
     };
+    if (Array.isArray(model.efforts) && model.efforts.length && !effort) {
+      group.listedEfforts = [...(group.listedEfforts || [])];
+      for (const named of model.efforts) {
+        if (!group.listedEfforts.includes(named)) group.listedEfforts.push(named);
+      }
+    }
     if (model.variants && Object.keys(model.variants).length) {
       Object.assign(group.variants, model.variants);
       for (const key of Object.keys(model.variants)) group.efforts.add(key);
@@ -267,11 +277,16 @@ export function collapseEffortVariants(models) {
   return order.map((groupKey) => {
     const group = groups.get(groupKey);
     const preferred = group.variants.high || group.variants.medium || group.variants.low || group.id;
-    const efforts = group.supports_thinking || group.efforts.size ? ["none", "low", "medium", "high"] : [];
+    const efforts = group.listedEfforts?.length
+      ? group.listedEfforts
+      : group.supports_thinking || group.efforts.size
+        ? ["none", "low", "medium", "high"]
+        : [];
     return createModel({
       id: group.id,
       name: prettyModelName(group.name, group.id),
       family: group.family,
+      provider: group.provider,
       context: group.context,
       output: group.output,
       supports_thinking: group.supports_thinking,

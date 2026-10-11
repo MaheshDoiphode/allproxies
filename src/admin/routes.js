@@ -20,7 +20,7 @@ function cookieHeader(token) {
   return `allproxies_admin=${encodeURIComponent(token)}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${12 * 60 * 60}`;
 }
 
-export function createAdmin({ settings, client, chatgpt = null }) {
+export function createAdmin({ settings, client, chatgpt = null, vertex = null }) {
   const sessions = new AdminSessions();
   const pending = new PendingLogins();
   const chatgptPending = new PendingLogins();
@@ -28,6 +28,7 @@ export function createAdmin({ settings, client, chatgpt = null }) {
   const pools = () => [
     { name: "antigravity", client },
     ...(chatgpt ? [{ name: "chatgpt", client: chatgpt }] : []),
+    ...(vertex ? [{ name: "vertex", client: vertex }] : []),
   ];
 
   function needsAuth() {
@@ -97,14 +98,15 @@ export function createAdmin({ settings, client, chatgpt = null }) {
       const refresh = url.searchParams.get("refresh") === "1";
       const antigravity = await client.listAccountViews({ refresh });
       const gpt = chatgpt ? await chatgpt.listAccountViews({ refresh }) : [];
-      const accounts = mergeAccountViews(antigravity, gpt);
+      const vx = vertex ? await vertex.listAccountViews({ refresh }) : [];
+      const accounts = mergeAccountViews(antigravity, gpt, vx);
       const usable = accounts.filter((item) => item && !item.disabled);
       const stats = {
-        requests: Number(client.stats?.requests || 0) + Number(chatgpt?.stats?.requests || 0),
-        success: Number(client.stats?.success || 0) + Number(chatgpt?.stats?.success || 0),
-        failed: Number(client.stats?.failed || 0) + Number(chatgpt?.stats?.failed || 0),
-        prompt_tokens: Number(client.stats?.prompt_tokens || 0) + Number(chatgpt?.stats?.prompt_tokens || 0),
-        completion_tokens: Number(client.stats?.completion_tokens || 0) + Number(chatgpt?.stats?.completion_tokens || 0),
+        requests: Number(client.stats?.requests || 0) + Number(chatgpt?.stats?.requests || 0) + Number(vertex?.stats?.requests || 0),
+        success: Number(client.stats?.success || 0) + Number(chatgpt?.stats?.success || 0) + Number(vertex?.stats?.success || 0),
+        failed: Number(client.stats?.failed || 0) + Number(chatgpt?.stats?.failed || 0) + Number(vertex?.stats?.failed || 0),
+        prompt_tokens: Number(client.stats?.prompt_tokens || 0) + Number(chatgpt?.stats?.prompt_tokens || 0) + Number(vertex?.stats?.prompt_tokens || 0),
+        completion_tokens: Number(client.stats?.completion_tokens || 0) + Number(chatgpt?.stats?.completion_tokens || 0) + Number(vertex?.stats?.completion_tokens || 0),
       };
       sendJson(res, 200, {
         version: VERSION,
@@ -114,6 +116,8 @@ export function createAdmin({ settings, client, chatgpt = null }) {
         port: settings.port,
         active: client.accountSummary(client.activeAccount()),
         chatgpt_active: chatgpt ? chatgpt.accountSummary(chatgpt.activeAccount()) : null,
+        vertex_active: vertex ? vertex.accountSummary(vertex.activeAccount()) : null,
+        vertex_catalog: vertex?.catalogStatus?.() || null,
         stats,
         accounts: {
           total: accounts.length,
@@ -128,7 +132,8 @@ export function createAdmin({ settings, client, chatgpt = null }) {
       const refresh = url.searchParams.get("refresh") === "1";
       const antigravity = await client.listAccountViews({ refresh });
       const gpt = chatgpt ? await chatgpt.listAccountViews({ refresh }) : [];
-      sendJson(res, 200, mergeAccountViews(antigravity, gpt));
+      const vx = vertex ? await vertex.listAccountViews({ refresh }) : [];
+      sendJson(res, 200, mergeAccountViews(antigravity, gpt, vx));
       return true;
     }
 
@@ -214,6 +219,25 @@ export function createAdmin({ settings, client, chatgpt = null }) {
       return true;
     }
 
+    if (apiPath === "/accounts/login-vertex" && req.method === "POST") {
+      if (!vertex) {
+        sendJson(res, 400, { error: { message: "Vertex provider is not configured" } });
+        return true;
+      }
+      const body = req.body || {};
+      try {
+        const bundle = await vertex.addAccount({
+          apiKey: body.api_key || body.apiKey || body.key,
+          location: body.location,
+          label: body.label || body.email,
+        });
+        sendJson(res, 200, { provider: "vertex", account: vertex.accountSummary(bundle) });
+      } catch (err) {
+        sendJson(res, err.status || 400, { error: { message: err.message || "Could not add Vertex key" } });
+      }
+      return true;
+    }
+
     if (apiPath.startsWith("/accounts/login/") && apiPath.endsWith("/poll") && req.method === "GET") {
       const state = decodeURIComponent(apiPath.slice("/accounts/login/".length, -"/poll".length));
       const rec = pending.get(state) || chatgptPending.get(state);
@@ -253,7 +277,7 @@ export function createAdmin({ settings, client, chatgpt = null }) {
     }
 
     const accountMatch = apiPath.match(/^\/accounts\/([^/]+)(?:\/(refresh|enable|disable))?$/);
-    if (accountMatch && !["login", "login-chatgpt", "batch"].includes(accountMatch[1])) {
+    if (accountMatch && !["login", "login-chatgpt", "login-vertex", "batch"].includes(accountMatch[1])) {
       const id = decodeURIComponent(accountMatch[1]);
       const extra = accountMatch[2];
       const match = findAccountIn(id, pools());
@@ -291,13 +315,33 @@ export function createAdmin({ settings, client, chatgpt = null }) {
 
     if (apiPath === "/models" && req.method === "GET") {
       try {
-        const [antigravityModels, chatgptModels] = await Promise.all([
-          client.fetchModels().catch(() => []),
-          chatgpt ? chatgpt.fetchModels().catch(() => []) : Promise.resolve([]),
+        const refresh = url.searchParams.get("refresh") === "1";
+        const [antigravityModels, chatgptModels, vertexModels] = await Promise.all([
+          client.fetchModels({ refresh }).catch(() => []),
+          chatgpt ? chatgpt.fetchModels({ refresh }).catch(() => []) : Promise.resolve([]),
+          vertex ? vertex.fetchModels({ refresh }).catch(() => []) : Promise.resolve([]),
         ]);
-        sendJson(res, 200, mergeModelLists(antigravityModels, chatgptModels));
+        sendJson(res, 200, {
+          models: mergeModelLists(
+            antigravityModels.map((model) => ({ ...model, provider: model.provider || "antigravity" })),
+            chatgptModels.map((model) => ({ ...model, provider: model.provider || "chatgpt" })),
+            vertexModels.map((model) => ({ ...model, provider: "vertex" })),
+          ),
+          catalogs: {
+            antigravity: { provider: "antigravity", listed: antigravityModels.length, reason: client.accounts().length ? "ready" : "none" },
+            chatgpt: chatgpt?.catalogStatus?.() || { provider: "chatgpt", listed: 0, reason: "none" },
+            vertex: vertex?.catalogStatus?.() || null,
+          },
+        });
       } catch {
-        sendJson(res, 200, []);
+        sendJson(res, 200, {
+          models: [],
+          catalogs: {
+            antigravity: { provider: "antigravity", listed: 0, reason: "none" },
+            chatgpt: chatgpt?.catalogStatus?.() || { provider: "chatgpt", listed: 0, reason: "none" },
+            vertex: vertex?.catalogStatus?.() || null,
+          },
+        });
       }
       return true;
     }
@@ -306,6 +350,7 @@ export function createAdmin({ settings, client, chatgpt = null }) {
       const prefixed = url.searchParams.get("prefixed") === "1";
       let antigravityModels = [];
       let chatgptModels = [];
+      let vertexModels = [];
       try {
         antigravityModels = Array.isArray(client.modelsCache?.models) && client.modelsCache.models.length
           ? client.modelsCache.models
@@ -322,8 +367,21 @@ export function createAdmin({ settings, client, chatgpt = null }) {
       } catch {
         chatgptModels = [];
       }
+      try {
+        vertexModels = vertex
+          ? (Array.isArray(vertex.modelsCache?.models) && vertex.modelsCache.models.length
+            ? vertex.modelsCache.models
+            : await vertex.fetchModels())
+          : [];
+      } catch {
+        vertexModels = [];
+      }
       sendJson(res, 200, buildClientGuides({
-        models: mergeModelLists(antigravityModels, chatgptModels),
+        models: mergeModelLists(
+          antigravityModels.map((model) => ({ ...model, provider: model.provider || "antigravity" })),
+          chatgptModels.map((model) => ({ ...model, provider: model.provider || "chatgpt" })),
+          vertexModels.map((model) => ({ ...model, provider: "vertex" })),
+        ),
         settings,
         provider: "antigravity",
         prefixed,

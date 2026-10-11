@@ -85,6 +85,11 @@ input, select {
 .bar.high > span { background: var(--warn); }
 .bar.critical > span { background: var(--bad); }
 .table-wrap { overflow: auto; }
+.model-group, .account-group { margin-bottom: 18px; }
+.model-group-head h3 { margin: 0 0 4px; font-size: 14px; }
+.model-group-head .muted { margin: 0 0 8px; }
+.account-group .account-card { margin-bottom: 8px; }
+.account-group .empty { padding: 14px; text-align: left; }
 table { width: 100%; border-collapse: collapse; font-size: 13px; }
 th, td { text-align: left; padding: 8px 6px; border-bottom: 1px solid var(--line); }
 .empty { color: var(--muted); padding: 24px; text-align: center; }

@@ -2,7 +2,7 @@
   "name": "allproxies",
   "version": "0.1.0",
   "private": true,
-  "description": "Local multi-provider AI API proxies. Providers: Google Antigravity and ChatGPT/Codex.",
+  "description": "Local multi-provider AI API proxies. Providers: Google Antigravity, ChatGPT/Codex, and Vertex AI Express Mode.",
   "type": "module",
   "engines": {
     "node": ">=22.5"

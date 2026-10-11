@@ -40,6 +40,8 @@ export function testSettings(dir, extra = {}) {
     chatgptTokenPath: extra.chatgptTokenPath ?? path.join(dir, "chatgpt-tokens.db"),
     chatgptBaseUrl: extra.chatgptBaseUrl ?? extra.settings?.chatgptBaseUrl,
     chatgptUsageUrl: extra.chatgptUsageUrl ?? extra.settings?.chatgptUsageUrl,
+    vertexTokenPath: extra.vertexTokenPath ?? path.join(dir, "vertex-tokens.db"),
+    vertexBaseUrl: extra.vertexBaseUrl ?? extra.settings?.vertexBaseUrl,
     modelsPath: MODELS_PATH,
     antigravityBaseUrl: extra.antigravityBaseUrl ?? "https://daily-cloudcode-pa.googleapis.com",
     antigravityHubVersion: extra.antigravityHubVersion ?? "2.9.1",
@@ -70,7 +72,7 @@ export function listen(app) {
 export async function startApi(dir, extra = {}) {
   const client = extra.client || testClient(dir, extra);
   const settings = extra.settings || client.settings;
-  const app = createApp({ settings, client, chatgpt: extra.chatgpt || null });
+  const app = createApp({ settings, client, chatgpt: extra.chatgpt || null, vertex: extra.vertex || null });
   const httpServer = await listen(app);
   return { ...httpServer, client, settings };
 }

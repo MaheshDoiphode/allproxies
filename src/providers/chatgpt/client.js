@@ -107,9 +107,41 @@ export class ChatgptClient {
     this.refreshLock = Promise.resolve();
     this.modelsCache = { at: 0, models: [], raw: null };
     this.modelsTtlMs = 60_000;
+    this.catalog = { at: 0, error: null, listed: 0, reason: "none" };
     this.quotaCache = new Map();
     this.quotaTtlMs = 30_000;
     this.stats = { requests: 0, success: 0, failed: 0, prompt_tokens: 0, completion_tokens: 0 };
+  }
+
+  catalogReason() {
+    const now = Date.now();
+    const accounts = this.accounts();
+    if (!accounts.length) return "none";
+    if (accounts.some((item) => !isAccountDisabled(item, now))) return "ready";
+    return "disabled";
+  }
+
+  catalogStatus() {
+    return {
+      provider: "chatgpt",
+      at: this.catalog.at || 0,
+      error: this.catalog.error || null,
+      listed: this.catalog.listed ?? this.modelsCache?.models?.length ?? 0,
+      reason: this.catalog.reason || this.catalogReason(),
+    };
+  }
+
+  rememberCatalog({ models = null, error = null, reason } = {}) {
+    const now = Date.now();
+    const list = Array.isArray(models) ? models : this.modelsCache?.models || [];
+    this.modelsCache = { at: now, models: list, raw: this.modelsCache?.raw || null };
+    this.catalog = {
+      at: now,
+      error: error ? String(error.message || error).slice(0, 400) : null,
+      listed: list.length,
+      reason: reason || this.catalogReason(),
+    };
+    return list;
   }
 
   get baseUrl() {
@@ -223,7 +255,7 @@ export class ChatgptClient {
     });
     bundle.enabled = true;
     this.store.save(createChatgptBundle(bundle));
-    this.modelsCache = { at: 0, models: [], raw: null };
+    this.rememberCatalog({ models: [], reason: "ready" });
     const saved = this.store.load();
     if (warm) this.warmAccount(saved).catch(() => {});
     return hydrateChatgptBundle(saved, chatgptAuthFromJwt(saved?.id_token || saved?.access_token));
@@ -473,6 +505,10 @@ export class ChatgptClient {
 
   async fetchModels({ refresh = false } = {}) {
     const now = Date.now();
+    const reason = this.catalogReason();
+    if (reason !== "ready") {
+      return this.rememberCatalog({ models: [], reason });
+    }
     if (!refresh && this.modelsCache?.models?.length && now - this.modelsCache.at < this.modelsTtlMs) {
       return this.modelsCache.models;
     }
@@ -485,6 +521,10 @@ export class ChatgptClient {
   }
 
   async refreshLiveModels() {
+    const reason = this.catalogReason();
+    if (reason !== "ready") {
+      return this.rememberCatalog({ models: [], reason });
+    }
     const now = Date.now();
     try {
       const bundle = await this.ensureToken();
@@ -494,13 +534,13 @@ export class ChatgptClient {
         timeoutMs: Math.min(this.settings.requestTimeoutMs, 15_000),
       });
       if (response.status >= 400) {
-        return this.modelsCache.models || [];
+        return this.rememberCatalog({ models: this.modelsCache.models || [], reason: "ready", error: new Error(response.body || `ChatGPT models ${response.status}`) });
       }
       const models = parseChatgptModels(response.parsed || {});
       this.modelsCache = { at: now, models, raw: response.parsed || {} };
-      return models;
-    } catch {
-      return this.modelsCache.models || [];
+      return this.rememberCatalog({ models, reason: "ready" });
+    } catch (err) {
+      return this.rememberCatalog({ models: this.modelsCache.models || [], reason: this.catalogReason(), error: err });
     }
   }
 
@@ -512,7 +552,8 @@ export class ChatgptClient {
     const requested = String(body?.model || "").trim();
     const models = this.modelsCache.models || [];
     const match = models.find((item) => item.id === requested || item.aliases?.includes(requested));
-    return { model: match?.id || requested, effort: null, modelInfo: this.modelInfoFor(match?.id || requested) };
+    const modelInfo = this.modelInfoFor(match?.id || requested);
+    return { model: match?.id || requested, effort: body?.reasoning_effort || body?.reasoning?.effort || null, modelInfo };
   }
 
   async resolveRequestModel(body) {

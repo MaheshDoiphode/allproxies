@@ -3,7 +3,7 @@ import path from "node:path";
 import test from "node:test";
 import { ChatgptClient } from "../src/providers/chatgpt/client.js";
 import { TokenStore, createChatgptBundle } from "../src/providers/chatgpt/tokens.js";
-import { isChatgptModelId, mergeModelLists, pickClient } from "../src/router.js";
+import { isChatgptModelId, isVertexModelId, mergeModelLists, pickClient } from "../src/router.js";
 import { mockServer, request, sendJson, startApi, tempDir, testSettings } from "./helpers.js";
 
 function sse(events) {
@@ -23,6 +23,17 @@ test("model family routes gpt ids to chatgpt", () => {
   assert.equal(pickClient({ model: "gemini-3.8-flash" }, { client, chatgpt }), client);
 });
 
+test("vertex prefix routes to vertex, unprefixed gemini stays antigravity", () => {
+  const chatgpt = { name: "chatgpt" };
+  const client = { name: "antigravity" };
+  const vertex = { name: "vertex" };
+  assert.equal(isVertexModelId("vertex/gemini-3.8-flash"), true);
+  assert.equal(isVertexModelId("vertex:gemini-3.8-flash"), true);
+  assert.equal(isVertexModelId("gemini-3.8-flash"), false);
+  assert.equal(pickClient({ model: "vertex/gemini-3.8-flash" }, { client, chatgpt, vertex }), vertex);
+  assert.equal(pickClient({ model: "gemini-3.8-flash" }, { client, chatgpt, vertex }), client);
+});
+
 test("merged catalog prefers unique chatgpt slugs first", () => {
   const merged = mergeModelLists(
     [{ id: "gemini-3.8-flash", family: "gemini" }],
@@ -30,6 +41,17 @@ test("merged catalog prefers unique chatgpt slugs first", () => {
   );
   assert.equal(merged[0].id, "gpt-5.6-terra");
   assert.equal(merged.filter((item) => item.id === "gemini-3.8-flash").length, 1);
+});
+
+test("vertex catalog stays separate from antigravity gemini", () => {
+  const merged = mergeModelLists(
+    [{ id: "gemini-3.8-flash", family: "gemini", provider: "antigravity" }],
+    [],
+    [{ id: "vertex/gemini-3.8-flash", family: "gemini", provider: "vertex", aliases: ["gemini-3.8-flash"] }],
+  );
+  assert.equal(merged.length, 2);
+  assert.ok(merged.find((item) => item.provider === "vertex" && item.id === "vertex/gemini-3.8-flash"));
+  assert.ok(merged.find((item) => item.provider === "antigravity" && item.id === "gemini-3.8-flash"));
 });
 
 test("/v1/messages for gpt hits Codex responses not Antigravity", async () => {

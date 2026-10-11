@@ -10,27 +10,50 @@ export function isChatgptModelId(model) {
   return GPT_PREFIXES.some((prefix) => raw.startsWith(prefix));
 }
 
-export function pickClient(body, { client, chatgpt } = {}) {
+export function isVertexModelId(model) {
+  const raw = String(model || "").trim();
+  if (!raw) return false;
+  if (/^(vertex|google-vertex|gemini-enterprise)[:/]/i.test(raw)) return true;
+  if (/^vertex-/i.test(stripModelPrefix(raw))) return true;
+  return false;
+}
+
+export function pickClient(body, { client, chatgpt, vertex } = {}) {
   if (chatgpt && isChatgptModelId(body?.model)) return chatgpt;
+  if (vertex && isVertexModelId(body?.model)) return vertex;
   return client;
 }
 
-export function mergeModelLists(antigravity = [], chatgpt = []) {
+export function modelProviderOf(model, fallback = "antigravity") {
+  if (model?.provider) return model.provider;
+  if (model?.family === "gpt") return "chatgpt";
+  if (String(model?.id || "").startsWith("vertex/") || (model?.aliases || []).some((alias) => String(alias).startsWith("vertex/"))) {
+    return "vertex";
+  }
+  return fallback;
+}
+
+export function mergeModelLists(first = [], second = [], ...rest) {
   const seen = new Set();
   const out = [];
-  for (const model of [...chatgpt, ...antigravity]) {
-    if (!model?.id || seen.has(model.id)) continue;
-    seen.add(model.id);
-    out.push(model);
+  for (const model of [...second, ...first, ...rest.flat()]) {
+    if (!model?.id) continue;
+    const provider = modelProviderOf(model);
+    const key = `${provider}:${model.id}`;
+    if (seen.has(key)) continue;
+    if (provider !== "vertex" && seen.has(`id:${model.id}`)) continue;
+    seen.add(key);
+    seen.add(`id:${model.id}`);
+    out.push({ ...model, provider });
   }
   return out;
 }
 
-export function mergeAccountViews(antigravity = [], chatgpt = []) {
-  return [
-    ...antigravity.map((item) => ({ ...item, provider: item.provider || "antigravity" })),
-    ...chatgpt.map((item) => ({ ...item, provider: item.provider || "chatgpt" })),
-  ];
+export function mergeAccountViews(...lists) {
+  const names = ["antigravity", "chatgpt", "vertex"];
+  return lists.flatMap((list, index) =>
+    (list || []).map((item) => ({ ...item, provider: item.provider || names[index] || "antigravity" })),
+  );
 }
 
 export function findAccountIn(id, clients = []) {

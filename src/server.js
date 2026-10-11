@@ -93,8 +93,8 @@ async function readJson(req) {
   }
 }
 
-export function createApp({ settings, client, chatgpt = null }) {
-  const admin = createAdmin({ settings, client, chatgpt });
+export function createApp({ settings, client, chatgpt = null, vertex = null }) {
+  const admin = createAdmin({ settings, client, chatgpt, vertex });
   return createServer(async (req, res) => {
     const url = new URL(req.url || "/", "http://localhost");
     const path = url.pathname;
@@ -105,14 +105,16 @@ export function createApp({ settings, client, chatgpt = null }) {
     if (req.method === "GET" && path === "/health") {
       const accounts = client.accounts();
       const chatgptAccounts = chatgpt ? chatgpt.accounts() : [];
+      const vertexAccounts = vertex ? vertex.accounts() : [];
       const bundle = client.activeAccount() || client.store.load();
       const gpt = chatgpt?.activeAccount?.() || chatgpt?.store?.load?.();
+      const vx = vertex?.activeAccount?.() || vertex?.store?.load?.();
       sendJson(res, 200, {
         status: "ok",
         version: VERSION,
         provider: "antigravity",
-        logged_in: Boolean(bundle?.refresh_token || accounts.length || gpt?.refresh_token || chatgptAccounts.length),
-        email: bundle?.email || gpt?.email || null,
+        logged_in: Boolean(bundle?.refresh_token || accounts.length || gpt?.refresh_token || chatgptAccounts.length || vx?.refresh_token || vertexAccounts.length),
+        email: bundle?.email || gpt?.email || vx?.email || null,
         project: projectOf(bundle),
         endpoint: client.baseUrl,
         chatgpt: chatgpt
@@ -123,9 +125,18 @@ export function createApp({ settings, client, chatgpt = null }) {
               accounts: chatgptAccounts.length,
             }
           : null,
+        vertex: vertex
+          ? {
+              logged_in: Boolean(vx?.refresh_token || vertexAccounts.length),
+              email: vx?.email || null,
+              endpoint: vertex.baseUrl,
+              accounts: vertexAccounts.length,
+            }
+          : null,
         accounts: mergeAccountViews(
           accounts.map((item) => client.accountSummary(item)),
           chatgptAccounts.map((item) => chatgpt.accountSummary(item)),
+          vertexAccounts.map((item) => vertex.accountSummary(item)),
         ),
       });
       return;
@@ -139,18 +150,23 @@ export function createApp({ settings, client, chatgpt = null }) {
     }
 
     if (req.method === "GET" && path === "/v1/models") {
-      const [antigravityModels, chatgptModels] = await Promise.all([
+      const [antigravityModels, chatgptModels, vertexModels] = await Promise.all([
         client.fetchModels().catch(() => []),
         chatgpt ? chatgpt.fetchModels().catch(() => []) : Promise.resolve([]),
+        vertex ? vertex.fetchModels().catch(() => []) : Promise.resolve([]),
       ]);
-      const models = mergeModelLists(antigravityModels, chatgptModels);
+      const models = mergeModelLists(
+        antigravityModels.map((model) => ({ ...model, provider: model.provider || "antigravity" })),
+        chatgptModels.map((model) => ({ ...model, provider: model.provider || "chatgpt" })),
+        vertexModels.map((model) => ({ ...model, provider: "vertex" })),
+      );
       sendJson(res, 200, {
         object: "list",
         data: models.map((model) => ({
           id: model.id,
           object: "model",
           created: 0,
-          owned_by: model.family === "gpt" ? "chatgpt" : "antigravity",
+          owned_by: model.provider || (model.family === "gpt" ? "chatgpt" : "antigravity"),
           name: model.name,
           family: model.family,
           context_window: model.context,
@@ -161,6 +177,7 @@ export function createApp({ settings, client, chatgpt = null }) {
           aliases: model.aliases,
           quota: { remaining_fraction: model.remaining_fraction, reset_time: model.reset_time },
           source: model.source,
+          provider: model.provider,
         })),
       });
       return;
@@ -168,7 +185,7 @@ export function createApp({ settings, client, chatgpt = null }) {
 
     if (req.method === "POST" && (path === "/v1/chat/completions" || path === "/chat/completions" || path === "/openai/v1/chat/completions")) {
       const body = req.body || await readJson(req);
-      const target = pickClient(body, { client, chatgpt });
+      const target = pickClient(body, { client, chatgpt, vertex });
       if (settings.debugRequests) console.log(`[req] ${path} model=${body.model} stream=${Boolean(body.stream)} effort=${body.reasoning_effort || body.reasoning?.effort || body.output_config?.effort || ""}`);
       if (isStreaming(body)) {
         await pipeSse(res, target.chatCompletionsStream(body));
@@ -180,7 +197,7 @@ export function createApp({ settings, client, chatgpt = null }) {
 
     if (req.method === "POST" && (path === "/v1/messages" || path === "/messages" || path === "/anthropic/v1/messages")) {
       const body = req.body || await readJson(req);
-      const target = pickClient(body, { client, chatgpt });
+      const target = pickClient(body, { client, chatgpt, vertex });
       if (settings.debugRequests) {
         const thinking = body.thinking && typeof body.thinking === "object" ? `${body.thinking.type || ""}/${body.thinking.effort || body.thinking.budget_tokens || ""}` : "";
         const tools = Array.isArray(body.tools) ? body.tools.length : 0;
@@ -197,7 +214,7 @@ export function createApp({ settings, client, chatgpt = null }) {
 
     if (req.method === "POST" && (path === "/v1/responses" || path === "/responses" || path === "/openai/v1/responses")) {
       const body = req.body || await readJson(req);
-      const target = pickClient(body, { client, chatgpt });
+      const target = pickClient(body, { client, chatgpt, vertex });
       if (isStreaming(body)) {
         await pipeSse(res, target.responsesStream(body));
         return;
@@ -212,8 +229,16 @@ export function createApp({ settings, client, chatgpt = null }) {
       try {
         sendJson(res, 200, client.getResponse(id));
       } catch (err) {
-        if (!chatgpt) throw err;
-        sendJson(res, 200, chatgpt.getResponse(id));
+        try {
+          if (chatgpt) {
+            sendJson(res, 200, chatgpt.getResponse(id));
+            return;
+          }
+          throw err;
+        } catch (inner) {
+          if (!vertex) throw inner;
+          sendJson(res, 200, vertex.getResponse(id));
+        }
       }
       return;
     }
@@ -222,8 +247,16 @@ export function createApp({ settings, client, chatgpt = null }) {
       try {
         sendJson(res, 200, client.deleteResponse(id));
       } catch (err) {
-        if (!chatgpt) throw err;
-        sendJson(res, 200, chatgpt.deleteResponse(id));
+        try {
+          if (chatgpt) {
+            sendJson(res, 200, chatgpt.deleteResponse(id));
+            return;
+          }
+          throw err;
+        } catch (inner) {
+          if (!vertex) throw inner;
+          sendJson(res, 200, vertex.deleteResponse(id));
+        }
       }
       return;
     }
@@ -246,8 +279,8 @@ export function createApp({ settings, client, chatgpt = null }) {
   });
 }
 
-export function startServer({ settings, client, chatgpt = null }) {
-  const server = createApp({ settings, client, chatgpt });
+export function startServer({ settings, client, chatgpt = null, vertex = null }) {
+  const server = createApp({ settings, client, chatgpt, vertex });
   return new Promise((resolve) => {
     server.listen(settings.port, settings.host, () => {
       console.log(`allproxies listening on http://${settings.host}:${settings.port}`);

@@ -82,6 +82,7 @@
           <div class="card-actions">
             <button type="button" class="btn btn-ghost" id="refreshBtn">Refresh quotas</button>
             <button type="button" class="btn btn-ghost" id="addChatgptBtn">Add ChatGPT account</button>
+            <button type="button" class="btn btn-ghost" id="addVertexBtn">Add Vertex key</button>
             <button type="button" class="btn btn-primary" id="addAccountBtn">Add Google account</button>
           </div>
         </div>
@@ -94,8 +95,14 @@
             <button type="button" class="btn btn-sm danger" data-batch="delete">Delete</button>
           </div>
           <input type="search" id="filterSearch" placeholder="Filter email" />
+          <select id="filterProvider">
+            <option value="all">All providers</option>
+            <option value="antigravity">Antigravity</option>
+            <option value="chatgpt">ChatGPT</option>
+            <option value="vertex">Vertex</option>
+          </select>
           <select id="filterStatus">
-            <option value="all">All</option>
+            <option value="all">All statuses</option>
             <option value="enabled">Enabled</option>
             <option value="disabled">Disabled</option>
             <option value="limited">Limited</option>
@@ -103,21 +110,26 @@
         </div>
         <p id="loginHint" class="muted hidden">Waiting for Google… pick the other Pro account in the new tab.</p>
         <p id="chatgptLoginHint" class="muted hidden">Waiting for ChatGPT… finish sign-in in the new tab.</p>
+        <p id="vertexLoginHint" class="muted hidden">Paste a Vertex Express Mode API key (starts with AQ.).</p>
         <div id="accountsList"></div>
       </section>
 
       <section id="tabModels" class="card hidden">
         <div class="card-header">
           <h2>Models</h2>
+          <div class="card-actions">
+            <button type="button" class="btn btn-ghost" id="refreshModelsBtn">Reload catalogs</button>
+          </div>
         </div>
-        <div id="modelsList" class="table-wrap"></div>
+        <p class="muted" id="modelsIntro">Live catalogs per provider. Vertex ids are <code>vertex/…</code> so they do not collide with Antigravity Gemini.</p>
+        <div id="modelsList"></div>
       </section>
 
       <section id="tabSetup" class="card hidden">
         <div class="card-header">
           <h2>Client setup</h2>
           <div class="card-actions">
-            <label class="check"><input type="checkbox" id="guidePrefixed" /> Prefix ids (Gemini:…)</label>
+            <label class="check"><input type="checkbox" id="guidePrefixed" /> Prefix names (Antigravity:…)</label>
             <button type="button" class="btn btn-ghost" id="guideRefresh">Reload snippets</button>
           </div>
         </div>
@@ -166,6 +178,6 @@
       </section>
     </div>
   </div>
-  <script src="/admin/app.js?v=setup6"></script>
+  <script src="/admin/app.js?v=prefix-persist1"></script>
 </body>
 </html>

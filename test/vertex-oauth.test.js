@@ -1,0 +1,51 @@
+import assert from "node:assert/strict";
+import path from "node:path";
+import test from "node:test";
+import { vertexGeneratePath, vertexModelResource, vertexRegionalBase, vertexStreamPath } from "../src/core/vertex-constants.js";
+import { TokenStore, createVertexBundle, hydrateVertexBundle, vertexApiKeyOf, vertexLocationOf } from "../src/providers/vertex/tokens.js";
+import { loadStaticVertexCatalog, parseVertexModels, resolveVertexRoute } from "../src/providers/vertex/catalog.js";
+import { tempDir } from "./helpers.js";
+
+test("vertex express paths stay on the global host", () => {
+  assert.equal(vertexRegionalBase("global"), "https://aiplatform.googleapis.com");
+  assert.equal(vertexRegionalBase("us-central1"), "https://us-central1-aiplatform.googleapis.com");
+  assert.equal(vertexRegionalBase("us"), "https://aiplatform.us.rep.googleapis.com");
+  assert.equal(vertexModelResource("gemini-3.8-flash"), "publishers/google/models/gemini-3.8-flash");
+  assert.equal(vertexGeneratePath("gemini-3.8-flash"), "publishers/google/models/gemini-3.8-flash:generateContent");
+  assert.match(vertexStreamPath("gemini-3.8-flash"), /streamGenerateContent\?alt=sse$/);
+});
+
+test("vertex key store never prints the raw key as email", () => {
+  const dir = tempDir();
+  const store = new TokenStore(path.join(dir, "vertex-tokens.db"));
+  const saved = createVertexBundle({ api_key: "AQ.Ab8RN6L1Q7uvsLfzPZRPUqOCl", location: "global", label: "work" });
+  store.save(saved);
+  const loaded = hydrateVertexBundle(store.load());
+  assert.equal(loaded.email, "work");
+  assert.equal(vertexApiKeyOf(loaded), "AQ.Ab8RN6L1Q7uvsLfzPZRPUqOCl");
+  assert.equal(vertexLocationOf(loaded), "global");
+  assert.ok(!String(loaded.email).includes("AQ."));
+});
+
+test("live vertex catalog keeps every publisher family", () => {
+  const parsed = parseVertexModels({
+    publisherModels: [
+      { name: "publishers/google/models/gemini-3.8-flash", displayName: "Gemini 3.8 Flash", inputTokenLimit: 1048576 },
+      { name: "publishers/google/models/imagen-4.0-generate-001", displayName: "Imagen 4" },
+      { name: "publishers/google/models/text-embedding-004", displayName: "Embedding" },
+      { name: "publishers/google/models/veo-3.0-generate-001", displayName: "Veo 3" },
+      { name: "publishers/anthropic/models/claude-sonnet-4-6", displayName: "Claude Sonnet 4.6" },
+    ],
+  });
+  assert.ok(parsed.find((item) => item.id === "vertex/gemini-3.8-flash")?.supports_thinking);
+  assert.equal(parsed.find((item) => item.id === "vertex/imagen-4.0-generate-001")?.family, "imagen");
+  assert.equal(parsed.find((item) => item.id === "vertex/text-embedding-004")?.family, "embedding");
+  assert.equal(parsed.find((item) => item.id === "vertex/veo-3.0-generate-001")?.family, "veo");
+  assert.equal(parsed.find((item) => item.id === "vertex/claude-sonnet-4-6")?.family, "claude");
+  const fallback = loadStaticVertexCatalog();
+  assert.ok(fallback.some((item) => item.id === "vertex/gemini-3.8-flash"));
+  assert.ok(fallback.some((item) => item.id === "vertex/gemini-2.5-flash"));
+  const route = resolveVertexRoute({ model: "vertex/gemini-3.8-flash", reasoning_effort: "low" }, parsed);
+  assert.equal(route.model, "gemini-3.8-flash");
+  assert.equal(route.effort, "low");
+});

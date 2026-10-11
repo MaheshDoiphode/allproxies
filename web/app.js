@@ -1,8 +1,10 @@
 (() => {
   const TOKEN_KEY = "ap_admin_token";
+  const PREFIX_KEY = "ap_guide_prefixed";
   const selected = new Set();
   let accounts = [];
   let models = [];
+  let catalogs = {};
   let guides = null;
   let pollTimer = null;
 
@@ -95,10 +97,16 @@
     return '<span class="badge warn">no project</span>';
   }
 
+  function accountProvider(a) {
+    return a.provider || "antigravity";
+  }
+
   function filtered() {
-    const q = ($("filterSearch").value || "").toLowerCase();
-    const st = $("filterStatus").value;
+    const q = ($("filterSearch")?.value || "").toLowerCase();
+    const st = $("filterStatus")?.value || "all";
+    const provider = $("filterProvider")?.value || "all";
     return accounts.filter((a) => {
+      if (provider !== "all" && accountProvider(a) !== provider) return false;
       if (q && !(a.email || a.id || "").toLowerCase().includes(q)) return false;
       if (st === "enabled" && a.enabled === false) return false;
       if (st === "disabled" && a.enabled !== false) return false;
@@ -107,41 +115,66 @@
     });
   }
 
-  function renderAccounts() {
-    const root = $("accountsList");
-    const rows = filtered();
-    if (!rows.length) {
-      root.innerHTML = '<div class="empty">No accounts yet. Add a Google Pro account.</div>';
-      return;
-    }
-    root.innerHTML = rows.map((a) => {
-      const id = `${a.provider || "antigravity"}:${a.id}`;
-      const checked = selected.has(id) ? "checked" : "";
-      return `<article class="account-card ${selected.has(id) ? "selected" : ""}" data-id="${escapeHtml(id)}">
-        <div class="account-head">
-          <div>
-            <label class="check"><input type="checkbox" class="pick" data-id="${escapeHtml(id)}" ${checked} />
-              <span class="account-email">${escapeHtml(a.email || id)}</span>
-            </label>
-            <div class="account-meta">
-              ${a.active ? '<span class="badge ok">last used</span>' : ""}
-              ${statusBadge(a)}
-              ${a.provider === "chatgpt" ? `<span class="badge">${escapeHtml(a.plan || "chatgpt")}</span>` : projectBadge(a)}
-              <span class="badge">${escapeHtml(a.provider || "antigravity")}</span>
-              <span class="badge">${a.request_count || 0} req</span>
-            </div>
-          </div>
-          <div class="account-actions">
-            <button class="btn btn-sm" data-act="refresh" data-id="${escapeHtml(id)}">Refresh</button>
-            <button class="btn btn-sm" data-act="use" data-id="${escapeHtml(id)}">Use</button>
-            <button class="btn btn-sm" data-act="toggle" data-id="${escapeHtml(id)}">${a.enabled === false ? "Enable" : "Disable"}</button>
-            <button class="btn btn-sm danger" data-act="delete" data-id="${escapeHtml(id)}">Delete</button>
+  function renderAccountCard(a) {
+    const id = `${accountProvider(a)}:${a.id}`;
+    const checked = selected.has(id) ? "checked" : "";
+    return `<article class="account-card ${selected.has(id) ? "selected" : ""}" data-id="${escapeHtml(id)}">
+      <div class="account-head">
+        <div>
+          <label class="check"><input type="checkbox" class="pick" data-id="${escapeHtml(id)}" ${checked} />
+            <span class="account-email">${escapeHtml(a.email || id)}</span>
+          </label>
+          <div class="account-meta">
+            ${a.active ? '<span class="badge ok">last used</span>' : ""}
+            ${statusBadge(a)}
+            ${accountProvider(a) === "chatgpt" ? `<span class="badge">${escapeHtml(a.plan || "chatgpt")}</span>` : projectBadge(a)}
+            <span class="badge">${a.request_count || 0} req</span>
           </div>
         </div>
-        ${renderQuotas(a.quotas)}
-      </article>`;
+        <div class="account-actions">
+          <button class="btn btn-sm" data-act="refresh" data-id="${escapeHtml(id)}">Refresh</button>
+          <button class="btn btn-sm" data-act="use" data-id="${escapeHtml(id)}">Use</button>
+          <button class="btn btn-sm" data-act="toggle" data-id="${escapeHtml(id)}">${a.enabled === false ? "Enable" : "Disable"}</button>
+          <button class="btn btn-sm danger" data-act="delete" data-id="${escapeHtml(id)}">Delete</button>
+        </div>
+      </div>
+      ${renderQuotas(a.quotas)}
+    </article>`;
+  }
+
+  function accountGroupEmpty(id) {
+    if (id === "chatgpt") return "No ChatGPT accounts. Add ChatGPT account to load gpt-* / o-series models.";
+    if (id === "vertex") return "No Vertex key. Add a Vertex Express key to use vertex/… models.";
+    return "No Antigravity accounts. Add a Google Pro account.";
+  }
+
+  function renderAccounts() {
+    const root = $("accountsList");
+    if (!root) return;
+    const rows = filtered();
+    const groups = [
+      { id: "antigravity", title: "Antigravity", hint: "Cloud Code / Copilot Gemini via Google login" },
+      { id: "chatgpt", title: "ChatGPT / Codex", hint: "gpt-* and o-series from a ChatGPT login" },
+      { id: "vertex", title: "Vertex AI", hint: "Express Mode API key (AQ.)" },
+    ];
+    const leftover = rows.filter((a) => !groups.some((g) => g.id === accountProvider(a)));
+    if (!accounts.length) {
+      root.innerHTML = '<div class="empty">No accounts yet. Add a Google, ChatGPT, or Vertex login.</div>';
+      $("batchBar")?.classList.toggle("hidden", true);
+      return;
+    }
+    root.innerHTML = groups.concat(leftover.length ? [{ id: "other", title: "Other", hint: "" }] : []).map((group) => {
+      const list = group.id === "other" ? leftover : rows.filter((a) => accountProvider(a) === group.id);
+      const empty = !list.length ? accountGroupEmpty(group.id) : "";
+      return `<section class="account-group">
+        <div class="model-group-head">
+          <h3>${escapeHtml(group.title)} <span class="muted">${list.length}</span></h3>
+          ${group.hint ? `<p class="muted">${escapeHtml(group.hint)}</p>` : ""}
+        </div>
+        ${list.length ? list.map(renderAccountCard).join("") : `<div class="empty">${escapeHtml(empty)}</div>`}
+      </section>`;
     }).join("");
-    $("batchBar").classList.toggle("hidden", selected.size === 0);
+    $("batchBar")?.classList.toggle("hidden", selected.size === 0);
   }
 
   function renderStats(status) {
@@ -159,26 +192,84 @@
     $("statActive").textContent = status.active?.email ? `last used ${status.active.email}` : "no accounts in use";
   }
 
-  function renderModels() {
-    const root = $("modelsList");
-    if (!models.length) {
-      root.innerHTML = '<div class="empty">No models loaded.</div>';
-      return;
-    }
-    root.innerHTML = `<table><thead><tr><th>Id</th><th>Name</th><th>Think</th><th>Quota left</th><th>Reset</th></tr></thead><tbody>${
-      models.map((m) => `<tr>
+  function modelProvider(m) {
+    return m.provider || m.owned_by || (m.family === "gpt" ? "chatgpt" : "antigravity");
+  }
+
+  function renderModelTable(list) {
+    if (!list.length) return "";
+    return `<div class="table-wrap"><table><thead><tr><th>Id</th><th>Name</th><th>Family</th><th>Think</th><th>Images</th><th>Source</th><th>Quota left</th></tr></thead><tbody>${
+      list.map((m) => `<tr>
         <td><code>${escapeHtml(m.id)}</code></td>
         <td>${escapeHtml(m.name || "")}</td>
+        <td>${escapeHtml(m.family || "")}</td>
         <td>${m.supports_thinking ? "yes" : ""}</td>
+        <td>${m.supports_images === false ? "" : "yes"}</td>
+        <td>${escapeHtml(m.source || "")}</td>
         <td>${m.remaining_fraction == null ? "—" : Math.round(m.remaining_fraction * 100) + "%"}</td>
-        <td>${escapeHtml(fmtReset(m.reset_time))}</td>
       </tr>`).join("")
-    }</tbody></table>`;
+    }</tbody></table></div>`;
+  }
+
+  function providerAccounts(id) {
+    return accounts.filter((a) => accountProvider(a) === id);
+  }
+
+  function vertexCatalogNote() {
+    const src = catalogs?.vertex?.source;
+    if (src === "express" || catalogs?.vertex?.error) {
+      return "Express Mode has no list API. These are Google's documented Express models — copy an id into Setup or any client. Other Vertex ids still work as vertex/<id>.";
+    }
+    return "Live publisher catalog. Use vertex/model-name.";
+  }
+
+  function modelGroupEmpty(id) {
+    const listed = providerAccounts(id);
+    const enabled = listed.filter((a) => a.enabled !== false && !a.disabled);
+    if (id === "chatgpt") {
+      if (!listed.length) return "No ChatGPT account. Add one on the Accounts tab to load gpt-* / o-series models.";
+      if (!enabled.length) return "ChatGPT account is disabled. Enable it on the Accounts tab to load models.";
+      return catalogs?.chatgpt?.error || "ChatGPT catalog is empty. Refresh after the account is ready.";
+    }
+    if (id === "vertex") {
+      if (!listed.length) return "No Vertex key. Add an Express Mode key on the Accounts tab.";
+      if (!enabled.length) return "Vertex key is disabled. Enable it on the Accounts tab to use vertex/… models.";
+      return catalogs?.vertex?.error || "No Vertex models listed.";
+    }
+    if (!listed.length) return "No Antigravity account. Add a Google Pro login on the Accounts tab.";
+    if (!enabled.length) return "Antigravity account is disabled. Enable it on the Accounts tab to load models.";
+    return "No Antigravity models listed.";
+  }
+
+  function renderModels() {
+    const root = $("modelsList");
+    if (!root) return;
+    const groups = [
+      { id: "antigravity", title: "Antigravity", hint: "Cloud Code / Copilot Gemini via Google login" },
+      { id: "chatgpt", title: "ChatGPT / Codex", hint: "gpt-* and o-series from a ChatGPT login" },
+      { id: "vertex", title: "Vertex AI", hint: vertexCatalogNote() },
+    ];
+    const leftover = models.filter((m) => !groups.some((g) => g.id === modelProvider(m)));
+    const intro = $("modelsIntro");
+    if (intro) {
+      intro.textContent = `${models.length} models · ${groups.map((g) => `${g.title} ${models.filter((m) => modelProvider(m) === g.id).length}`).join(" · ")}`;
+    }
+    root.innerHTML = groups.concat(leftover.length ? [{ id: "other", title: "Other", hint: "" }] : []).map((group) => {
+      const list = group.id === "other" ? leftover : models.filter((m) => modelProvider(m) === group.id);
+      return `<section class="model-group">
+        <div class="model-group-head">
+          <h3>${escapeHtml(group.title)} <span class="muted">${list.length}</span></h3>
+          ${group.hint ? `<p class="muted">${escapeHtml(group.hint)}</p>` : ""}
+        </div>
+        ${list.length ? renderModelTable(list) : `<div class="empty">${escapeHtml(modelGroupEmpty(group.id))}</div>`}
+      </section>`;
+    }).join("");
   }
 
   async function loadAll(refresh = false) {
     const status = await api("/status" + (refresh ? "?refresh=1" : ""));
     accounts = status.items || [];
+    if (status.vertex_catalog) catalogs = { ...catalogs, vertex: status.vertex_catalog };
     renderStats(status);
     renderAccounts();
     if (refresh) scheduleFollowup();
@@ -203,7 +294,14 @@
   }
 
   async function loadModels() {
-    models = await api("/models");
+    const payload = await api("/models?refresh=1");
+    if (Array.isArray(payload)) {
+      models = payload;
+      catalogs = {};
+    } else {
+      models = payload?.models || [];
+      catalogs = payload?.catalogs || {};
+    }
     renderModels();
   }
 
@@ -227,7 +325,20 @@
     }
   }
 
+  function restorePrefixed() {
+    const box = $("guidePrefixed");
+    if (!box) return;
+    box.checked = localStorage.getItem(PREFIX_KEY) === "1";
+  }
+
+  function persistPrefixed() {
+    const box = $("guidePrefixed");
+    if (!box) return;
+    localStorage.setItem(PREFIX_KEY, box.checked ? "1" : "0");
+  }
+
   async function loadGuides() {
+    persistPrefixed();
     const prefixed = $("guidePrefixed")?.checked ? "1" : "0";
     if ($("guideIntro")) $("guideIntro").textContent = "Loading setup snippets…";
     try {
@@ -251,6 +362,24 @@
       document.execCommand("copy");
       area.remove();
       toast("Copied");
+    }
+  }
+
+  async function addVertexKey() {
+    const key = window.prompt("Vertex Express Mode API key (starts with AQ.)");
+    if (!key) return;
+    const location = window.prompt("Location (global)", "global") || "global";
+    const label = window.prompt("Label (optional)", "") || undefined;
+    const hint = $("vertexLoginHint");
+    if (hint) hint.classList.remove("hidden");
+    try {
+      await api("/accounts/login-vertex", { method: "POST", body: { api_key: key.trim(), location, label } });
+      toast("Vertex key added");
+      await loadAll(false);
+      await loadModels().catch(() => {});
+      loadAll(true).catch(() => {});
+    } finally {
+      if (hint) hint.classList.add("hidden");
     }
   }
 
@@ -281,6 +410,7 @@
   async function showMain() {
     $("loginPage").classList.add("hidden");
     $("mainPage").classList.remove("hidden");
+    restorePrefixed();
     await loadAll(false);
     loadModels().catch(() => {});
     setTimeout(() => loadAll(true).catch(() => {}), 250);
@@ -326,8 +456,11 @@
 
   $("addAccountBtn")?.addEventListener("click", () => startLogin("/accounts/login", "loginHint", "Google account added").catch((err) => toast(err.message)));
   $("addChatgptBtn")?.addEventListener("click", () => startLogin("/accounts/login-chatgpt", "chatgptLoginHint", "ChatGPT account added").catch((err) => toast(err.message)));
+  $("addVertexBtn")?.addEventListener("click", () => addVertexKey().catch((err) => toast(err.message)));
   $("refreshBtn")?.addEventListener("click", () => loadAll(true).catch((err) => toast(err.message)));
+  $("refreshModelsBtn")?.addEventListener("click", () => loadModels().catch((err) => toast(err.message)));
   $("filterSearch")?.addEventListener("input", renderAccounts);
+  $("filterProvider")?.addEventListener("change", renderAccounts);
   $("filterStatus")?.addEventListener("change", renderAccounts);
   $("selectAll")?.addEventListener("change", (ev) => {
     selected.clear();

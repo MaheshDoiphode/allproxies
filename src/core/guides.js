@@ -2,26 +2,34 @@ import { collapseEffortVariants } from "../providers/antigravity/catalog.js";
 
 const PROVIDER_LABELS = {
   antigravity: "Antigravity",
-  gemini: "Gemini",
-  claude: "Claude",
-  gpt: "GPT",
+  chatgpt: "ChatGPT",
+  vertex: "Vertex",
 };
 
 const REASONING_LEVELS = ["none", "low", "medium", "high"];
 
-export function providerPrefix(family, provider = "antigravity") {
-  const fam = String(family || "").toLowerCase();
-  if (fam === "claude") return "Claude";
-  if (fam === "gpt" || fam === "openai") return "GPT";
-  if (fam === "gemini") return "Gemini";
-  const label = PROVIDER_LABELS[provider] || provider;
-  return String(label).replace(/[^A-Za-z0-9]+/g, "") || "Model";
+export function providerLabel(provider = "antigravity") {
+  const key = String(provider || "antigravity").toLowerCase();
+  if (PROVIDER_LABELS[key]) return PROVIDER_LABELS[key];
+  const cleaned = String(provider || "").replace(/[^A-Za-z0-9]+/g, "");
+  return cleaned ? cleaned[0].toUpperCase() + cleaned.slice(1) : "Antigravity";
 }
 
-export function displayModelId(model, { provider = "antigravity", prefixed = false } = {}) {
-  const id = String(model?.id || "");
-  if (!prefixed) return id;
-  return `${providerPrefix(model?.family, provider)}:${id}`;
+export function providerPrefix(family, provider = "antigravity") {
+  return providerLabel(provider || family);
+}
+
+export function displayModelId(model) {
+  return String(model?.id || "");
+}
+
+export function displayModelName(model, { provider = "antigravity", prefixed = false } = {}) {
+  const raw = String(model?.name || model?.id || "").trim();
+  if (!prefixed) return raw;
+  const label = providerLabel(model?.provider || provider);
+  const already = new RegExp(`^${label}\\s*:`, "i");
+  if (already.test(raw)) return raw;
+  return `${label}:${raw}`;
 }
 
 export function publicBaseUrl(settings) {
@@ -63,15 +71,15 @@ export function vscodeLanguageModels({
   prefixed = false,
 } = {}) {
   const baseUrl = publicBaseUrl(settings);
-  const name = provider === "antigravity" ? "allproxies" : `allproxies ${providerPrefix("", provider)}`;
+  const name = "allproxies";
   const listed = collapseEffortVariants(models);
   return {
     name,
     vendor: "customendpoint",
     apiType: vscodeApiType(apiType),
     models: listed.map((model) => ({
-      id: displayModelId(model, { provider, prefixed }),
-      name: model.name || model.id,
+      id: displayModelId(model),
+      name: displayModelName(model, { provider: model.provider || provider, prefixed }),
       url: vscodeUrl(baseUrl, apiType),
       headers: settings?.apiKey ? { Authorization: `Bearer ${settings.apiKey}` } : undefined,
       toolCalling: true,
@@ -79,7 +87,11 @@ export function vscodeLanguageModels({
       maxInputTokens: Number(model.context || 1_048_576),
       maxOutputTokens: Number(model.output || 65_536),
       thinking: Boolean(model.supports_thinking),
-      supportsReasoningEffort: model.efforts?.length ? model.efforts : model.supports_thinking ? REASONING_LEVELS : undefined,
+      supportsReasoningEffort: Array.isArray(model.efforts) && model.efforts.length
+        ? model.efforts
+        : model.supports_thinking
+          ? REASONING_LEVELS
+          : undefined,
       reasoningEffortFormat: (model.efforts?.length || model.supports_thinking) ? vscodeReasoningFormat(apiType) : undefined,
     })).map((item) => {
       const cleaned = { ...item };
@@ -105,7 +117,6 @@ export function claudeCodeSettings({
   models = [],
   settings,
   provider = "antigravity",
-  prefixed = false,
 } = {}) {
   const baseUrl = publicBaseUrl(settings);
   models = collapseEffortVariants(models);
@@ -124,7 +135,7 @@ export function claudeCodeSettings({
     (m) => /haiku|lite/i.test(m.id),
     (m) => sonnet && m.id === sonnet.id,
   ]);
-  const idOf = (model) => (model ? displayModelId(model, { provider, prefixed }) : "");
+  const idOf = (model) => (model ? displayModelId(model) : "");
   return {
     $schema: "https://json.schemastore.org/claude-code-settings.json",
     env: {
@@ -175,8 +186,6 @@ export function escapeToml(value) {
 export function codexConfig({
   models = [],
   settings,
-  provider = "antigravity",
-  prefixed = false,
   providerKey = "allproxies",
 } = {}) {
   const baseUrl = `${publicBaseUrl(settings)}/v1`;
@@ -188,7 +197,7 @@ export function codexConfig({
     (m) => /gemini-3\.8-flash/.test(m.id),
     (m) => /gemini-pro-agent|gemini-3\.1-pro/.test(m.id),
   ]);
-  const modelId = chosen ? displayModelId(chosen, { provider, prefixed }) : "";
+  const modelId = chosen ? displayModelId(chosen) : "";
   const context = Number(chosen?.context || 1_048_576);
   return `# ~/.codex/config.toml
 model = "${escapeToml(modelId)}"
@@ -244,8 +253,8 @@ export function buildClientGuides({
       completions: vscodeLanguageModels({ models: listed, settings, provider, apiType: "openai", prefixed }),
       responses: vscodeLanguageModels({ models: listed, settings, provider, apiType: "responses", prefixed }),
     },
-    claude_code: claudeCodeSettings({ models: listed, settings, provider, prefixed }),
-    codex: codexConfig({ models: listed, settings, provider, prefixed }),
+    claude_code: claudeCodeSettings({ models: listed, settings, provider }),
+    codex: codexConfig({ models: listed, settings }),
     endpoints: openaiCompatSnippet({ settings }),
   };
 }

@@ -45,36 +45,31 @@
       "use_responses_lite": true,
       "default_reasoning_level": "medium",
       "default_verbosity": "low",
-      "available_in_plans": [
-        "business",
-        "edu",
-        "edu_plus",
-        "edu_pro",
-        "education",
-        "ent26",
-        "enterprise",
-        "enterprise_cbp_automation",
-        "enterprise_cbp_trial",
-        "enterprise_cbp_usage_based",
-        "finserv",
-        "free",
-        "free_workspace",
-        "go",
-        "hc",
-        "k12",
-        "law",
-        "plus",
-        "pro",
-        "prolite",
-        "promax",
-        "quorum",
-        "sci",
-        "self_serve_business_prolite",
-        "self_serve_business_usage_based",
-        "team"
-      ],
       "support_verbosity": true,
-      "supports_parallel_tool_calls": true
+      "supported_reasoning_levels": [
+        {
+          "effort": "low",
+          "description": "Fast responses with lighter reasoning"
+        },
+        {
+          "effort": "medium",
+          "description": "Balances speed and reasoning depth for everyday tasks"
+        },
+        {
+          "effort": "high",
+          "description": "Greater reasoning depth for complex problems"
+        },
+        {
+          "effort": "xhigh",
+          "description": "Extra high reasoning depth for complex problems"
+        },
+        {
+          "effort": "max",
+          "description": "Maximum reasoning depth for the hardest problems"
+        }
+      ],
+      "supports_parallel_tool_calls": true,
+      "context_window": 272000
     },
     {
       "slug": "gpt-5.6-terra",
@@ -83,36 +78,35 @@
       "use_responses_lite": true,
       "default_reasoning_level": "medium",
       "default_verbosity": "low",
-      "available_in_plans": [
-        "business",
-        "edu",
-        "edu_plus",
-        "edu_pro",
-        "education",
-        "ent26",
-        "enterprise",
-        "enterprise_cbp_automation",
-        "enterprise_cbp_trial",
-        "enterprise_cbp_usage_based",
-        "finserv",
-        "free",
-        "free_workspace",
-        "go",
-        "hc",
-        "k12",
-        "law",
-        "plus",
-        "pro",
-        "prolite",
-        "promax",
-        "quorum",
-        "sci",
-        "self_serve_business_prolite",
-        "self_serve_business_usage_based",
-        "team"
-      ],
       "support_verbosity": true,
-      "supports_parallel_tool_calls": true
+      "supported_reasoning_levels": [
+        {
+          "effort": "low",
+          "description": "Fast responses with lighter reasoning"
+        },
+        {
+          "effort": "medium",
+          "description": "Balances speed and reasoning depth for everyday tasks"
+        },
+        {
+          "effort": "high",
+          "description": "Greater reasoning depth for complex problems"
+        },
+        {
+          "effort": "xhigh",
+          "description": "Extra high reasoning depth for complex problems"
+        },
+        {
+          "effort": "max",
+          "description": "Maximum reasoning depth for the hardest problems"
+        },
+        {
+          "effort": "ultra",
+          "description": "Maximum reasoning with automatic task delegation"
+        }
+      ],
+      "supports_parallel_tool_calls": true,
+      "context_window": 272000
     },
     {
       "slug": "gpt-5.6-luna",
@@ -121,36 +115,31 @@
       "use_responses_lite": true,
       "default_reasoning_level": "medium",
       "default_verbosity": "low",
-      "available_in_plans": [
-        "business",
-        "edu",
-        "edu_plus",
-        "edu_pro",
-        "education",
-        "ent26",
-        "enterprise",
-        "enterprise_cbp_automation",
-        "enterprise_cbp_trial",
-        "enterprise_cbp_usage_based",
-        "finserv",
-        "free",
-        "free_workspace",
-        "go",
-        "hc",
-        "k12",
-        "law",
-        "plus",
-        "pro",
-        "prolite",
-        "promax",
-        "quorum",
-        "sci",
-        "self_serve_business_prolite",
-        "self_serve_business_usage_based",
-        "team"
-      ],
       "support_verbosity": true,
-      "supports_parallel_tool_calls": true
+      "supported_reasoning_levels": [
+        {
+          "effort": "low",
+          "description": "Fast responses with lighter reasoning"
+        },
+        {
+          "effort": "medium",
+          "description": "Balances speed and reasoning depth for everyday tasks"
+        },
+        {
+          "effort": "high",
+          "description": "Greater reasoning depth for complex problems"
+        },
+        {
+          "effort": "xhigh",
+          "description": "Extra high reasoning depth for complex problems"
+        },
+        {
+          "effort": "max",
+          "description": "Maximum reasoning depth for the hardest problems"
+        }
+      ],
+      "supports_parallel_tool_calls": true,
+      "context_window": 272000
     },
     {
       "slug": "gpt-5.5",
@@ -159,36 +148,27 @@
       "use_responses_lite": false,
       "default_reasoning_level": "medium",
       "default_verbosity": "low",
-      "available_in_plans": [
-        "business",
-        "edu",
-        "edu_plus",
-        "edu_pro",
-        "education",
-        "ent26",
-        "enterprise",
-        "enterprise_cbp_automation",
-        "enterprise_cbp_trial",
-        "enterprise_cbp_usage_based",
-        "finserv",
-        "free",
-        "free_workspace",
-        "go",
-        "hc",
-        "k12",
-        "law",
-        "plus",
-        "pro",
-        "prolite",
-        "promax",
-        "quorum",
-        "sci",
-        "self_serve_business_prolite",
-        "self_serve_business_usage_based",
-        "team"
-      ],
       "support_verbosity": true,
-      "supports_parallel_tool_calls": true
+      "supported_reasoning_levels": [
+        {
+          "effort": "low",
+          "description": "Fast responses with lighter reasoning"
+        },
+        {
+          "effort": "medium",
+          "description": "Balances speed and reasoning depth for everyday tasks"
+        },
+        {
+          "effort": "high",
+          "description": "Greater reasoning depth for complex problems"
+        },
+        {
+          "effort": "xhigh",
+          "description": "Extra high reasoning depth for complex problems"
+        }
+      ],
+      "supports_parallel_tool_calls": true,
+      "context_window": 272000
     },
     {
       "slug": "codex-auto-review",
@@ -197,33 +177,31 @@
       "use_responses_lite": true,
       "default_reasoning_level": "medium",
       "default_verbosity": "low",
-      "available_in_plans": [
-        "business",
-        "edu",
-        "edu_plus",
-        "edu_pro",
-        "education",
-        "ent26",
-        "enterprise",
-        "enterprise_cbp_automation",
-        "enterprise_cbp_trial",
-        "enterprise_cbp_usage_based",
-        "finserv",
-        "go",
-        "hc",
-        "law",
-        "plus",
-        "pro",
-        "prolite",
-        "promax",
-        "quorum",
-        "sci",
-        "self_serve_business_prolite",
-        "self_serve_business_usage_based",
-        "team"
-      ],
       "support_verbosity": true,
-      "supports_parallel_tool_calls": true
+      "supported_reasoning_levels": [
+        {
+          "effort": "low",
+          "description": "Fast responses with lighter reasoning"
+        },
+        {
+          "effort": "medium",
+          "description": "Balances speed and reasoning depth for everyday tasks"
+        },
+        {
+          "effort": "high",
+          "description": "Greater reasoning depth for complex problems"
+        },
+        {
+          "effort": "xhigh",
+          "description": "Extra high reasoning depth for complex problems"
+        },
+        {
+          "effort": "max",
+          "description": "Maximum reasoning depth for the hardest problems"
+        }
+      ],
+      "supports_parallel_tool_calls": true,
+      "context_window": 272000
     }
   ]
 }

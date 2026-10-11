@@ -119,7 +119,12 @@ test("public catalog hides visibility=hide models", () => {
   assert.ok(!ids.includes("gpt-reserve"));
   assert.ok(!ids.includes("gpt-5.5"));
   assert.ok(!ids.includes("codex-auto-review"));
-  assert.equal(models.find((item) => item.id === "gpt-5.6-terra").use_responses_lite, true);
+  const terra = models.find((item) => item.id === "gpt-5.6-terra");
+  assert.equal(terra.use_responses_lite, true);
+  assert.deepEqual(terra.efforts, ["low", "medium", "high", "xhigh", "max", "ultra"]);
+  const luna = models.find((item) => item.id === "gpt-5.6-luna");
+  assert.ok(luna.efforts.includes("xhigh"));
+  assert.ok(!luna.efforts.includes("ultra"));
 });
 
 test("lite normalize moves tools and drops max_output_tokens", () => {

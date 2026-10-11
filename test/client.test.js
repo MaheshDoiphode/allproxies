@@ -110,7 +110,7 @@ test("quota on one account fails over to the next", async () => {
       const auth = req.headers.authorization || "";
       tokens.push(auth);
       if (auth.includes("access-token")) {
-        sendJson(res, 429, { error: { message: "Quota exceeded. Limit resets 2026-10-11T00:00:00Z", status: "RESOURCE_EXHAUSTED" } });
+        sendJson(res, 429, { error: { message: "Quota exceeded. Limit resets 2028-10-11T00:00:00Z", status: "RESOURCE_EXHAUSTED" } });
         return;
       }
       sendJson(res, 200, { response: { candidates: [{ content: { parts: [{ text: "from-second" }] } }] } });
@@ -158,7 +158,7 @@ test("stream quota on one account fails over before any SSE", async () => {
       const auth = req.headers.authorization || "";
       tokens.push(auth);
       if (auth.includes("access-token")) {
-        sendJson(res, 429, { error: { message: "Quota exceeded. Limit resets 2026-10-11T00:00:00Z", status: "RESOURCE_EXHAUSTED" } });
+        sendJson(res, 429, { error: { message: "Quota exceeded. Limit resets 2028-10-11T00:00:00Z", status: "RESOURCE_EXHAUSTED" } });
         return;
       }
       res.writeHead(200, { "Content-Type": "text/event-stream" });
