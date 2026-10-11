@@ -46,12 +46,26 @@ function thinkingLevelWire(level) {
   return THINKING_WIRE[resolved] || null;
 }
 
+function requestEffort(body = {}, effort) {
+  const extras = body.extra_body && typeof body.extra_body === "object" ? body.extra_body : {};
+  return (
+    effort ??
+    body.reasoning_effort ??
+    body.reasoningEffort ??
+    extras.reasoning_effort ??
+    extras.thinking_level ??
+    extras.thinkingLevel ??
+    extractEffortFromBody(body)
+  );
+}
+
 export function vertexThinkingFromRequest(model, body = {}, effort) {
   const extras = body.extra_body && typeof body.extra_body === "object" ? body.extra_body : {};
   const thinking = extras.google || extras.thinking || extras.vertex || body.thinking;
-  const rawEffort = effort ?? extractEffortFromBody(body);
-  if (String(rawEffort || "").toLowerCase() === "minimal" || String(rawEffort || "").toLowerCase() === "min") {
-    return { includeThoughts: true, thinkingLevel: "MINIMAL" };
+  const rawEffort = requestEffort(body, effort);
+  const rawLower = String(rawEffort || "").trim().toLowerCase();
+  if (rawLower === "minimal" || rawLower === "min") {
+    return { includeThoughts: false, thinkingLevel: "LOW" };
   }
   const resolved = normalizeEffort(rawEffort);
   if (resolved === "none") return null;
@@ -62,21 +76,28 @@ export function vertexThinkingFromRequest(model, body = {}, effort) {
     const budget = thinking.thinkingBudget ?? thinking.budget_tokens ?? thinking.thinking_budget;
     if (level) {
       const wire = thinkingLevelWire(level);
-      if (wire) config.thinkingLevel = wire;
+      if (wire === "MINIMAL") {
+        config.thinkingLevel = "LOW";
+        config.includeThoughts = false;
+      } else if (wire) {
+        config.thinkingLevel = wire;
+      }
     }
     if (budget != null && Number.isFinite(Number(budget))) config.thinkingBudget = Number(budget);
     if (thinking.includeThoughts != null || thinking.include_thoughts != null) {
       config.includeThoughts = Boolean(thinking.includeThoughts ?? thinking.include_thoughts);
-    } else if (Object.keys(config).length) {
+    } else if (Object.keys(config).length && config.includeThoughts == null) {
       config.includeThoughts = true;
     }
     if (Object.keys(config).length) return config;
   }
   const wire = thinkingLevelWire(resolved);
+  if (wire === "MINIMAL") return { includeThoughts: false, thinkingLevel: "LOW" };
   if (wire) return { includeThoughts: true, thinkingLevel: wire };
   const lowered = String(model || "").toLowerCase();
   for (const level of ["minimal", "low", "medium", "high"]) {
     if (lowered.endsWith(`-${level}`)) {
+      if (level === "minimal") return { includeThoughts: false, thinkingLevel: "LOW" };
       const mapped = thinkingLevelWire(level);
       return mapped ? { includeThoughts: true, thinkingLevel: mapped } : null;
     }
@@ -112,6 +133,24 @@ export function mediaPartFromUrl(url, mimeHint) {
   return { fileData: { fileUri: raw, mimeType: mimeHint || guessMime(raw) } };
 }
 
+function imagePartFromAnthropic(item) {
+  if (!item || typeof item !== "object") return null;
+  const source = item.source && typeof item.source === "object" ? item.source : item;
+  const mime = item.media_type || item.mime_type || item.mimeType || source.media_type || source.mime_type || source.mimeType;
+  if (source.type === "base64" && source.data) {
+    return { inlineData: { mimeType: mime || "image/png", data: String(source.data) } };
+  }
+  if (item.type === "base64" && (item.data || source.data)) {
+    return { inlineData: { mimeType: mime || "image/png", data: String(item.data || source.data) } };
+  }
+  const url = item.url || source.url || item.file_url || source.file_url;
+  if (url) return mediaPartFromUrl(url, mime);
+  if (item.data && typeof item.data === "string" && !item.data.startsWith("http") && !item.data.startsWith("gs://") && !item.data.startsWith("data:")) {
+    return { inlineData: { mimeType: mime || "image/png", data: item.data } };
+  }
+  return null;
+}
+
 export function openaiContentToVertexParts(content) {
   if (content == null) return [];
   if (typeof content === "string") return content ? [{ text: content }] : [];
@@ -128,11 +167,18 @@ export function openaiContentToVertexParts(content) {
       parts.push({ text: String(item.text) });
       continue;
     }
+    if (kind === "image" || kind === "base64" || item.source) {
+      const part = imagePartFromAnthropic(item);
+      if (part) {
+        parts.push(part);
+        continue;
+      }
+    }
     if (kind === "image_url" || kind === "image" || kind === "input_image") {
-      let url = item.image_url ?? item.image ?? item.url;
+      let url = item.image_url ?? item.image ?? item.url ?? item.source?.url;
       if (url && typeof url === "object") url = url.url;
-      const mime = item.mime_type || item.mimeType || (item.image_url && item.image_url.mime_type);
-      const part = mediaPartFromUrl(url, mime);
+      const mime = item.mime_type || item.mimeType || item.media_type || (item.image_url && item.image_url.mime_type);
+      const part = mediaPartFromUrl(url, mime) || imagePartFromAnthropic(item);
       if (part) parts.push(part);
       continue;
     }
@@ -315,7 +361,7 @@ export function anthropicToVertex(body, { model, effort } = {}) {
   );
   return wrapVertexGenerate({
     model,
-    contents,
+    contents: applyVertexParts(contents, body.messages || []),
     system,
     generation,
     tools: toolsFromAnthropic(body),

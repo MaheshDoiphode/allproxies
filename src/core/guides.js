@@ -6,7 +6,7 @@ const PROVIDER_LABELS = {
   vertex: "Vertex",
 };
 
-const REASONING_LEVELS = ["none", "low", "medium", "high"];
+const REASONING_LEVELS = ["none", "minimal", "low", "medium", "high"];
 
 export function providerLabel(provider = "antigravity") {
   const key = String(provider || "antigravity").toLowerCase();

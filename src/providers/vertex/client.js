@@ -420,8 +420,8 @@ export class VertexClient {
       if (!cached.length) this.rememberCatalog({ models, source: "express" });
       return models;
     }
+    if (this.catalog.error) return cached.length ? cached : loadStaticVertexCatalog();
     if (!refresh && cached.length && now - (this.modelsCache.at || 0) < this.modelsTtlMs) {
-      if (!this.catalog.error) this.refreshLiveModels().catch(() => {});
       return cached;
     }
     return this.refreshLiveModels();

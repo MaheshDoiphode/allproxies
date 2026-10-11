@@ -15,8 +15,8 @@ test("thinking levels map to Vertex MINIMAL/LOW/MEDIUM/HIGH", () => {
     thinkingLevel: "LOW",
   });
   assert.deepEqual(vertexThinkingFromRequest("gemini-3.8-flash", {}, "minimal"), {
-    includeThoughts: true,
-    thinkingLevel: "MINIMAL",
+    includeThoughts: false,
+    thinkingLevel: "LOW",
   });
   assert.equal(vertexThinkingFromRequest("gemini-3.8-flash", { thinking: { type: "disabled" } }), null);
 });
@@ -58,6 +58,26 @@ test("openai chat becomes Vertex generateContent with thinking + image config", 
   assert.deepEqual(body.generationConfig.thinkingConfig, { includeThoughts: true, thinkingLevel: "LOW" });
   assert.deepEqual(body.generationConfig.imageConfig, { aspectRatio: "16:9", imageSize: "2K" });
   assert.deepEqual(body.generationConfig.responseModalities, ["TEXT", "IMAGE"]);
+});
+
+test("anthropic image blocks become Vertex inlineData", () => {
+  const wrapped = anthropicToVertex(
+    {
+      model: "vertex/gemini-3.8-flash",
+      max_tokens: 32,
+      messages: [{
+        role: "user",
+        content: [
+          { type: "text", text: "whats in the image ?" },
+          { type: "image", source: { type: "base64", media_type: "image/jpeg", data: "abc123" } },
+        ],
+      }],
+    },
+    { model: "gemini-3.8-flash" },
+  );
+  const body = vertexHttpBody(wrapped);
+  assert.equal(body.contents[0].parts[0].text, "whats in the image ?");
+  assert.deepEqual(body.contents[0].parts[1].inlineData, { mimeType: "image/jpeg", data: "abc123" });
 });
 
 test("anthropic messages keep thinking budget when given", () => {

@@ -4,7 +4,6 @@ const EFFORT_ALIASES = {
   none: "none",
   disabled: "none",
   off: "none",
-  minimal: "low",
   extra: "low",
   "extra-low": "low",
   low: "low",

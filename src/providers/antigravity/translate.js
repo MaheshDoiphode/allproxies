@@ -74,10 +74,19 @@ export function openaiContentToParts(content) {
     if (!item || typeof item !== "object") continue;
     const kind = item.type;
     if (["text", "input_text", "output_text"].includes(kind) && item.text) parts.push(textPart(String(item.text)));
-    else if (kind === "image_url" || kind === "image") {
-      let url = item.image_url;
+    else if (kind === "image_url" || kind === "image" || kind === "input_image" || kind === "base64") {
+      let url = item.image_url ?? item.url;
       if (url && typeof url === "object") url = url.url;
-      if (typeof url === "string") parts.push(imagePart(url));
+      const source = item.source && typeof item.source === "object" ? item.source : null;
+      if (source?.type === "base64" && source.data) {
+        parts.push({ inlineData: { mimeType: source.media_type || source.mime_type || "image/png", data: String(source.data) } });
+      } else if (item.type === "base64" && item.data) {
+        parts.push({ inlineData: { mimeType: item.media_type || item.mime_type || "image/png", data: String(item.data) } });
+      } else if (typeof url === "string") {
+        parts.push(imagePart(url));
+      } else if (source?.url) {
+        parts.push(imagePart(source.url));
+      }
     }
   }
   return parts;
@@ -186,6 +195,7 @@ export function anthropicToGemini(body) {
       normalized.push({ role: "assistant", content: texts.join("\n"), tool_calls: toolCalls });
     } else if (role === "user" && Array.isArray(content)) {
       const leftovers = [];
+      const media = [];
       for (const part of content) {
         if (part && part.type === "tool_result") {
           const raw = typeof part.content === "string" ? part.content : JSON.stringify(part.content ?? "");
@@ -196,8 +206,14 @@ export function anthropicToGemini(body) {
             content: raw,
           });
         } else if (part && part.type === "text") leftovers.push(part.text || "");
+        else if (part && (part.type === "image" || part.type === "image_url" || part.type === "input_image" || part.type === "base64" || part.source)) {
+          media.push(part);
+        } else if (part) leftovers.push(part);
       }
-      if (leftovers.length) normalized.push({ role: "user", content: leftovers.join("\n") });
+      if (leftovers.length || media.length) {
+        const bits = leftovers.map((item) => typeof item === "string" ? { type: "text", text: item } : item);
+        normalized.push({ role: "user", content: bits.concat(media) });
+      }
     } else {
       normalized.push(message);
     }
