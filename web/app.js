@@ -1,11 +1,19 @@
 (() => {
   const TOKEN_KEY = "ap_admin_token";
   const PREFIX_KEY = "ap_guide_prefixed";
+  const HIDDEN_KEY = "ap_hidden_models";
+  const CLAUDE_KEY = "ap_claude_picks";
+  const CLAUDE_1M_KEY = "ap_claude_1m";
+  const CODEX_KEY = "ap_codex_model";
   const selected = new Set();
   let accounts = [];
   let models = [];
   let catalogs = {};
   let guides = null;
+  let hiddenModels = new Set();
+  let claudePicks = {};
+  let claudeMillion = {};
+  let codexModel = "";
   let pollTimer = null;
 
   const $ = (id) => document.getElementById(id);
@@ -198,8 +206,9 @@
 
   function renderModelTable(list) {
     if (!list.length) return "";
-    return `<div class="table-wrap"><table><thead><tr><th>Id</th><th>Name</th><th>Family</th><th>Think</th><th>Images</th><th>Source</th><th>Quota left</th></tr></thead><tbody>${
-      list.map((m) => `<tr>
+    return `<div class="table-wrap"><table><thead><tr><th>Setup</th><th>Id</th><th>Name</th><th>Family</th><th>Think</th><th>Images</th><th>Source</th><th>Quota left</th></tr></thead><tbody>${
+      list.map((m) => `<tr class="${hiddenModels.has(m.id) ? "hidden-model" : ""}">
+        <td><label class="check"><input type="checkbox" class="setup-vis" data-id="${escapeHtml(m.id)}" ${hiddenModels.has(m.id) ? "" : "checked"} /></label></td>
         <td><code>${escapeHtml(m.id)}</code></td>
         <td>${escapeHtml(m.name || "")}</td>
         <td>${escapeHtml(m.family || "")}</td>
@@ -252,7 +261,8 @@
     const leftover = models.filter((m) => !groups.some((g) => g.id === modelProvider(m)));
     const intro = $("modelsIntro");
     if (intro) {
-      intro.textContent = `${models.length} models · ${groups.map((g) => `${g.title} ${models.filter((m) => modelProvider(m) === g.id).length}`).join(" · ")}`;
+      const hidden = models.filter((m) => hiddenModels.has(m.id)).length;
+      intro.textContent = `${models.length} models · ${hidden} hidden from Setup · ${groups.map((g) => `${g.title} ${models.filter((m) => modelProvider(m) === g.id).length}`).join(" · ")}`;
     }
     root.innerHTML = groups.concat(leftover.length ? [{ id: "other", title: "Other", hint: "" }] : []).map((group) => {
       const list = group.id === "other" ? leftover : models.filter((m) => modelProvider(m) === group.id);
@@ -337,13 +347,148 @@
     localStorage.setItem(PREFIX_KEY, box.checked ? "1" : "0");
   }
 
-  async function loadGuides() {
+  function loadPrefs() {
+    restorePrefixed();
+    try {
+      hiddenModels = new Set(JSON.parse(localStorage.getItem(HIDDEN_KEY) || "[]"));
+    } catch {
+      hiddenModels = new Set();
+    }
+    try {
+      claudePicks = JSON.parse(localStorage.getItem(CLAUDE_KEY) || "{}") || {};
+    } catch {
+      claudePicks = {};
+    }
+    try {
+      claudeMillion = JSON.parse(localStorage.getItem(CLAUDE_1M_KEY) || "{}") || {};
+    } catch {
+      claudeMillion = {};
+    }
+    codexModel = localStorage.getItem(CODEX_KEY) || "";
+  }
+
+  function persistHidden() {
+    localStorage.setItem(HIDDEN_KEY, JSON.stringify([...hiddenModels]));
+  }
+
+  function persistClaude() {
+    localStorage.setItem(CLAUDE_KEY, JSON.stringify(claudePicks));
+    localStorage.setItem(CLAUDE_1M_KEY, JSON.stringify(claudeMillion));
+  }
+
+  function persistCodex() {
+    localStorage.setItem(CODEX_KEY, codexModel || "");
+  }
+
+  function supportsMillion(id) {
+    return Boolean((guides?.choices || []).find((item) => item.id === id)?.million);
+  }
+
+  function modelOptions(selected) {
+    const choices = guides?.choices || [];
+    return choices.map((item) => `<option value="${escapeHtml(item.id)}" ${item.id === selected ? "selected" : ""}>${escapeHtml(item.name)} (${escapeHtml(item.id)})</option>`).join("");
+  }
+
+  function renderClaudePicks() {
+    const root = $("claudePicks");
+    if (!root) return;
+    const slots = guides?.claude_slots || [];
+    const defaults = guides?.claude_defaults || {};
+    root.innerHTML = slots.map((slot) => {
+      const selected = claudePicks[slot.key] || defaults[slot.key] || "";
+      const checked = claudeMillion[slot.key] ? "checked" : "";
+      return `<div class="pick-row">
+        <span>${escapeHtml(slot.label)}</span>
+        <select data-claude="${escapeHtml(slot.key)}">${modelOptions(selected)}</select>
+        <label class="check"><input type="checkbox" class="claude-1m-toggle" data-slot="${escapeHtml(slot.key)}" ${checked} /> 1M</label>
+      </div>`;
+    }).join("");
+  }
+
+  function renderCodexPicks() {
+    const root = $("codexPicks");
+    if (!root) return;
+    const selected = codexModel || guides?.codex_default || "";
+    root.innerHTML = `<div class="pick-row">
+      <span>Model</span>
+      <select id="codexModel">${modelOptions(selected)}</select>
+      <span></span>
+    </div>`;
+  }
+
+  function currentClaudeSettings() {
+    if (!guides?.claude_code) return {};
+    const next = JSON.parse(JSON.stringify(guides.claude_code));
+    const env = next.env || {};
+    const slots = {
+      model: "ANTHROPIC_MODEL",
+      sonnet: "ANTHROPIC_DEFAULT_SONNET_MODEL",
+      opus: "ANTHROPIC_DEFAULT_OPUS_MODEL",
+      haiku: "ANTHROPIC_DEFAULT_HAIKU_MODEL",
+      fast: "ANTHROPIC_SMALL_FAST_MODEL",
+      subagent: "CLAUDE_CODE_SUBAGENT_MODEL",
+    };
+    const defaults = guides.claude_defaults || {};
+    for (const [key, envKey] of Object.entries(slots)) {
+      const picked = claudePicks[key] || defaults[key] || env[envKey] || "";
+      let base = String(picked).replace(/\[1m\]$/i, "");
+      if (claudeMillion[key] && base) base += "[1m]";
+      env[envKey] = base;
+    }
+    next.env = env;
+    return next;
+  }
+
+  function currentCodexConfig() {
+    if (!guides?.codex) return "";
+    const picked = codexModel || guides.codex_default || "";
+    if (!picked) return guides.codex;
+    return guides.codex.replace(/^model\s*=\s*"[^"]*"/m, `model = "${picked.replace(/"/g, '\\"')}"`);
+  }
+
+  function renderGuideSnippets() {
+    if (!guides) return;
+    if ($("vscodeJson")) $("vscodeJson").textContent = pretty(currentVscodeSnippet());
+    if ($("claudeJson")) $("claudeJson").textContent = pretty(currentClaudeSettings());
+    if ($("codexToml")) $("codexToml").textContent = currentCodexConfig();
+    if ($("guideIntro")) {
+      $("guideIntro").textContent = `Base ${guides.base_url} · token ${guides.auth_token} · ${guides.vscode?.messages?.models?.length || 0} models`;
+    }
+  }
+
+  function renderGuides() {
+    if (!guides) return;
+    renderClaudePicks();
+    renderCodexPicks();
+    renderGuideSnippets();
+  }
+
+  async function loadGuides({ rebuild = true } = {}) {
     persistPrefixed();
-    const prefixed = $("guidePrefixed")?.checked ? "1" : "0";
+    persistHidden();
+    persistClaude();
+    persistCodex();
+    const params = new URLSearchParams();
+    if ($("guidePrefixed")?.checked) params.set("prefixed", "1");
+    if (hiddenModels.size) params.set("hidden", [...hiddenModels].join(","));
+    for (const [key, value] of Object.entries(claudePicks)) {
+      if (value) params.set("claude_" + key, value);
+    }
+    for (const [key, value] of Object.entries(claudeMillion)) {
+      if (value) params.set("claude_" + key + "_1m", "1");
+    }
+    if (codexModel) params.set("codex", codexModel);
     if ($("guideIntro")) $("guideIntro").textContent = "Loading setup snippets…";
     try {
-      guides = await api("/guides?prefixed=" + prefixed);
-      renderGuides();
+      guides = await api("/guides?" + params.toString());
+      if (guides.claude_defaults) {
+        for (const [key, value] of Object.entries(guides.claude_defaults)) {
+          if (!claudePicks[key]) claudePicks[key] = value;
+        }
+      }
+      if (!codexModel && guides.codex_default) codexModel = guides.codex_default;
+      if (rebuild) renderGuides();
+      else renderGuideSnippets();
     } catch (err) {
       if ($("guideIntro")) $("guideIntro").textContent = "Could not load setup snippets: " + err.message;
       throw err;
@@ -410,7 +555,7 @@
   async function showMain() {
     $("loginPage").classList.add("hidden");
     $("mainPage").classList.remove("hidden");
-    restorePrefixed();
+    loadPrefs();
     await loadAll(false);
     loadModels().catch(() => {});
     setTimeout(() => loadAll(true).catch(() => {}), 250);
@@ -483,6 +628,44 @@
   $("vscodeApiType")?.addEventListener("change", renderGuides);
   $("guidePrefixed")?.addEventListener("change", () => loadGuides().catch((err) => toast(err.message)));
   $("guideRefresh")?.addEventListener("click", () => loadGuides().catch((err) => toast(err.message)));
+  $("modelsList")?.addEventListener("change", (ev) => {
+    const box = ev.target.closest(".setup-vis");
+    if (!box) return;
+    if (box.checked) hiddenModels.delete(box.dataset.id);
+    else hiddenModels.add(box.dataset.id);
+    persistHidden();
+    renderModels();
+  });
+  $("claudePicks")?.addEventListener("change", (ev) => {
+    const select = ev.target.closest("select[data-claude]");
+    if (select) {
+      const slotKey = select.dataset.claude || select.getAttribute("data-claude");
+      claudePicks[slotKey] = select.value;
+      persistClaude();
+      renderGuideSnippets();
+      loadGuides({ rebuild: false }).catch(() => {});
+      return;
+    }
+    const box = ev.target.closest("input.claude-1m-toggle");
+    if (box) {
+      ev.stopPropagation();
+      const slotKey = box.dataset.slot || box.getAttribute("data-slot");
+      if (slotKey) {
+        claudeMillion[slotKey] = Boolean(box.checked);
+        persistClaude();
+        renderGuideSnippets();
+        loadGuides({ rebuild: false }).catch(() => {});
+      }
+    }
+  });
+  $("codexPicks")?.addEventListener("change", (ev) => {
+    const select = ev.target.closest("#codexModel");
+    if (!select) return;
+    codexModel = select.value;
+    persistCodex();
+    renderGuideSnippets();
+    loadGuides({ rebuild: false }).catch(() => {});
+  });
   $("tabSetup")?.addEventListener("click", (ev) => {
     const btn = ev.target.closest("[data-copy]");
     if (!btn) return;

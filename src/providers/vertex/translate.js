@@ -313,6 +313,7 @@ function applyVertexParts(contents, messages) {
   let index = 0;
   return (contents || []).map((content) => {
     if (String(content?.role || "") === "model") return content;
+    if (Array.isArray(content?.parts) && content.parts.some((p) => p && p.functionResponse)) return content;
     const source = sources[index];
     index += 1;
     if (!source || typeof source.content === "string" || source.content == null) return content;

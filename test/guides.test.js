@@ -97,16 +97,34 @@ test("prefixed names use provider not family", () => {
   assert.equal(snippet.models.find((item) => item.id === "gpt-5.4").name, "ChatGPT:GPT 5.4");
 });
 
+test("claude 1m suffix is applied when requested", () => {
+  const models = [
+    createModel({ id: "gemini-3.8-flash", name: "Gemini 3.8 Flash", family: "gemini", context: 200000, supports_thinking: true }),
+  ];
+  const settings = claudeCodeSettings({
+    models,
+    settings: SETTINGS,
+    picks: { model: "gemini-3.8-flash", sonnet: "gemini-3.8-flash", opus: "gemini-3.8-flash", haiku: "gemini-3.8-flash", fast: "gemini-3.8-flash", subagent: "gemini-3.8-flash" },
+    million: { model: true },
+  });
+  assert.equal(settings.env.ANTHROPIC_MODEL, "gemini-3.8-flash[1m]");
+  assert.equal(settings.env.ANTHROPIC_DEFAULT_SONNET_MODEL, "gemini-3.8-flash");
+});
+
 test("vscode snippet keeps live chatgpt efforts including xhigh and ultra", () => {
   const models = [
     createModel({
       id: "gpt-5.6-terra",
       name: "GPT 5.6 Terra",
       family: "gpt",
+      context: 272000,
+      output: 65536,
       supports_thinking: true,
       efforts: ["low", "medium", "high", "xhigh", "max", "ultra"],
     }),
   ];
   const snippet = vscodeLanguageModels({ models, settings: SETTINGS, apiType: "messages" });
+  assert.equal(snippet.models[0].maxInputTokens, 206464);
+  assert.equal(snippet.models[0].maxOutputTokens, 65536);
   assert.deepEqual(snippet.models[0].supportsReasoningEffort, ["low", "medium", "high", "xhigh", "max", "ultra"]);
 });

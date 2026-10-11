@@ -348,6 +348,15 @@ export function createAdmin({ settings, client, chatgpt = null, vertex = null })
 
     if (apiPath === "/guides" && req.method === "GET") {
       const prefixed = url.searchParams.get("prefixed") === "1";
+      const hidden = String(url.searchParams.get("hidden") || "").split(",").map((item) => item.trim()).filter(Boolean);
+      const claudePicks = {};
+      const claudeMillion = {};
+      for (const slot of ["model", "sonnet", "opus", "haiku", "fast", "subagent"]) {
+        const value = url.searchParams.get(`claude_${slot}`);
+        if (value) claudePicks[slot] = value;
+        if (url.searchParams.get(`claude_${slot}_1m`) === "1") claudeMillion[slot] = true;
+      }
+      const codexModel = url.searchParams.get("codex") || "";
       let antigravityModels = [];
       let chatgptModels = [];
       let vertexModels = [];
@@ -385,6 +394,10 @@ export function createAdmin({ settings, client, chatgpt = null, vertex = null })
         settings,
         provider: "antigravity",
         prefixed,
+        hidden,
+        claudePicks,
+        claudeMillion,
+        codexModel,
       }));
       return true;
     }

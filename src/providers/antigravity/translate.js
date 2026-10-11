@@ -94,7 +94,49 @@ export function openaiContentToParts(content) {
 
 export function normalizeContents(contents) {
   if (!contents.length) return [{ role: "user", parts: [{ text: "" }] }];
-  if (contents[0].role === "model") return [{ role: "user", parts: [{ text: "" }] }, ...contents];
+  if (contents[0].role === "model") contents.unshift({ role: "user", parts: [{ text: "" }] });
+
+  for (let i = 0; i < contents.length; i += 1) {
+    const turn = contents[i];
+    if (turn?.role !== "model" || !Array.isArray(turn.parts)) continue;
+    const calls = turn.parts.filter((p) => p && p.functionCall).map((p) => p.functionCall);
+    if (!calls.length) continue;
+
+    let next = contents[i + 1];
+    if (!next || next.role !== "user" || !Array.isArray(next.parts) || !next.parts.some((p) => p && p.functionResponse)) {
+      next = { role: "user", parts: [] };
+      contents.splice(i + 1, 0, next);
+    }
+
+    const respondedIds = new Set(next.parts.map((p) => p.functionResponse?.id).filter(Boolean));
+    const respondedNames = new Set(next.parts.map((p) => p.functionResponse?.name).filter(Boolean));
+    for (const call of calls) {
+      const match = (call.id && respondedIds.has(call.id)) || respondedNames.has(call.name);
+      if (!match) {
+        next.parts.push({
+          functionResponse: {
+            name: call.name,
+            response: { output: "" },
+            ...(call.id ? { id: call.id } : {}),
+          },
+        });
+      }
+    }
+    const currentResponses = next.parts.filter((p) => p && p.functionResponse);
+    while (currentResponses.length < calls.length) {
+      const missingCall = calls[currentResponses.length];
+      const placeholder = {
+        functionResponse: {
+          name: missingCall?.name || "tool",
+          response: { output: "" },
+          ...(missingCall?.id ? { id: missingCall.id } : {}),
+        },
+      };
+      next.parts.push(placeholder);
+      currentResponses.push(placeholder);
+    }
+  }
+
   return contents;
 }
 
@@ -129,12 +171,18 @@ export function openaiMessagesToGemini(messages) {
         : { result: parsed };
       const response = { name, response: wrapped };
       if (toolId) response.id = toolId;
-      contents.push({ role: "user", parts: [{ functionResponse: response }] });
+      const respPart = { functionResponse: response };
+
+      const last = contents[contents.length - 1];
+      if (last && last.role === "user" && Array.isArray(last.parts) && last.parts.some((p) => p.functionResponse)) {
+        last.parts.push(respPart);
+      } else {
+        contents.push({ role: "user", parts: [respPart] });
+      }
       continue;
     }
 
     const parts = openaiContentToParts(message.content);
-    let firstCall = true;
     for (const call of message.tool_calls || []) {
       const fn = call && typeof call === "object" ? call.function : null;
       if (!fn || typeof fn !== "object") continue;
@@ -151,12 +199,10 @@ export function openaiMessagesToGemini(messages) {
       if (callId) pendingCalls[callId] = name;
       const payload = { name, args: args || {} };
       if (callId) payload.id = callId;
-      const part = { functionCall: payload };
-      if (firstCall) {
-        part.thoughtSignature = SKIP_THOUGHT_SIGNATURE;
-        firstCall = false;
-      }
-      parts.push(part);
+      parts.push({
+        functionCall: payload,
+        thoughtSignature: SKIP_THOUGHT_SIGNATURE,
+      });
     }
     contents.push({ role: role === "assistant" ? "model" : "user", parts: parts.length ? parts : [textPart("")] });
   }

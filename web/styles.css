@@ -98,6 +98,11 @@ th, td { text-align: left; padding: 8px 6px; border-bottom: 1px solid var(--line
 .setup-head { display: flex; justify-content: space-between; align-items: center; gap: 10px; flex-wrap: wrap; }
 .setup-head h3 { margin: 0; font-size: 14px; }
 .setup-actions { display: flex; gap: 8px; align-items: center; }
+.setup-picks { display: grid; gap: 8px; margin: 10px 0; }
+.pick-row { display: grid; grid-template-columns: 110px 1fr auto; gap: 8px; align-items: center; }
+.pick-row span { font-size: 12px; color: var(--muted); }
+.pick-row select { min-width: 0; }
+tr.hidden-model { opacity: 0.45; }
 .code-block {
   margin: 10px 0 0;
   max-height: 360px;

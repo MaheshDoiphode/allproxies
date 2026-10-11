@@ -80,6 +80,44 @@ test("anthropic image blocks become Vertex inlineData", () => {
   assert.deepEqual(body.contents[0].parts[1].inlineData, { mimeType: "image/jpeg", data: "abc123" });
 });
 
+test("parallel anthropic tool calls and results are grouped into matching turns", () => {
+  const wrapped = anthropicToVertex(
+    {
+      model: "vertex/gemini-3.8-flash",
+      messages: [
+        {
+          role: "assistant",
+          content: [
+            { type: "tool_use", id: "t1", name: "Bash", input: { command: "ls" } },
+            { type: "tool_use", id: "t2", name: "ReadFile", input: { path: "a.txt" } },
+          ],
+        },
+        {
+          role: "user",
+          content: [
+            { type: "tool_result", tool_use_id: "t1", content: "file1" },
+            { type: "tool_result", tool_use_id: "t2", content: "file2" },
+          ],
+        },
+      ],
+    },
+    { model: "gemini-3.8-flash" },
+  );
+  const body = vertexHttpBody(wrapped);
+  // Verify model turn has 2 calls, both with thoughtSignature
+  const modelTurn = body.contents.find((c) => c.role === "model");
+  assert.equal(modelTurn.parts.length, 2);
+  assert.equal(modelTurn.parts[0].thoughtSignature, "skip_thought_signature_validator");
+  assert.equal(modelTurn.parts[1].thoughtSignature, "skip_thought_signature_validator");
+
+  // Verify there is ONE user turn with exactly 2 function responses
+  const userTurns = body.contents.filter((c) => c.role === "user" && c.parts?.some((p) => p.functionResponse));
+  assert.equal(userTurns.length, 1);
+  assert.equal(userTurns[0].parts.length, 2);
+  assert.equal(userTurns[0].parts[0].functionResponse.name, "Bash");
+  assert.equal(userTurns[0].parts[1].functionResponse.name, "ReadFile");
+});
+
 test("anthropic messages keep thinking budget when given", () => {
   const wrapped = anthropicToVertex(
     {

@@ -121,7 +121,7 @@
             <button type="button" class="btn btn-ghost" id="refreshModelsBtn">Reload catalogs</button>
           </div>
         </div>
-        <p class="muted" id="modelsIntro">Live catalogs per provider. Vertex ids are <code>vertex/…</code> so they do not collide with Antigravity Gemini.</p>
+        <p class="muted" id="modelsIntro">Live catalogs per provider. Uncheck Setup to keep a model out of VS Code / Claude / Codex snippets.</p>
         <div id="modelsList"></div>
       </section>
 
@@ -155,7 +155,8 @@
               <h3>Claude Code</h3>
               <button type="button" class="btn btn-sm" data-copy="claudeJson">Copy JSON</button>
             </div>
-            <p class="muted">Paste into <code>~/.claude/settings.json</code> (or a project <code>.claude/settings.json</code>).</p>
+            <p class="muted">Paste into <code>~/.claude/settings.json</code>. Pick a model per slot. Check 1M to append <code>[1m]</code> on million-context models.</p>
+            <div id="claudePicks" class="setup-picks"></div>
             <pre class="code-block" id="claudeJson"></pre>
           </article>
           <article class="setup-card">
@@ -164,6 +165,7 @@
               <button type="button" class="btn btn-sm" data-copy="codexToml">Copy TOML</button>
             </div>
             <p class="muted">Append to <code>~/.codex/config.toml</code>. Set <code>OPENAI_API_KEY</code> to the same token as this proxy.</p>
+            <div id="codexPicks" class="setup-picks"></div>
             <pre class="code-block" id="codexToml"></pre>
           </article>
           <article class="setup-card">
@@ -178,6 +180,6 @@
       </section>
     </div>
   </div>
-  <script src="/admin/app.js?v=prefix-persist1"></script>
+  <script src="/admin/app.js?v=setup-picks7"></script>
 </body>
 </html>
