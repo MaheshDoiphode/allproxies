@@ -297,52 +297,47 @@ function toolsFromAnthropic(body) {
   return tools.length ? sanitizeTools(tools) : null;
 }
 
+function estimateTurnSize(turn) {
+  let chars = 0;
+  for (const part of turn?.parts || []) {
+    if (!part || typeof part !== "object") continue;
+    if (typeof part.text === "string") chars += part.text.length;
+    else if (part.functionCall?.args) chars += JSON.stringify(part.functionCall.args).length;
+    else if (part.functionResponse?.response) chars += JSON.stringify(part.functionResponse.response).length;
+    else if (part.inlineData?.data) chars += Math.ceil((part.inlineData.data.length * 3) / 4 / 750) * 4;
+  }
+  return chars;
+}
+
+export function pruneContentsIfTooLarge(contents, maxChars = 3_200_000) {
+  if (!Array.isArray(contents) || contents.length <= 2) return contents;
+  let totalChars = 0;
+  for (const turn of contents) totalChars += estimateTurnSize(turn);
+  if (totalChars <= maxChars) return contents;
+
+  const pruned = [...contents];
+  while (pruned.length > 2 && totalChars > maxChars) {
+    const dropped = pruned.splice(1, 1)[0];
+    totalChars -= estimateTurnSize(dropped);
+  }
+  return pruned;
+}
+
 export function wrapVertexGenerate({ model, contents, system, generation, tools }) {
-  const request = { contents: rewriteGeminiMedia(contents) };
+  const rewritten = rewriteGeminiMedia(contents);
+  const safeContents = pruneContentsIfTooLarge(rewritten);
+  const request = { contents: safeContents };
   if (system) request.systemInstruction = system;
   if (generation && Object.keys(generation).length) request.generationConfig = generation;
   if (tools) request.tools = tools;
   return { model, request };
 }
 
-function applyVertexParts(contents, messages) {
-  const sources = (messages || []).filter((message) => {
-    const role = String(message?.role || "").toLowerCase();
-    return role !== "system" && role !== "developer" && role !== "tool";
-  });
-  let index = 0;
-  return (contents || []).map((content) => {
-    if (String(content?.role || "") === "model") return content;
-    if (Array.isArray(content?.parts) && content.parts.some((p) => p && p.functionResponse)) return content;
-    const source = sources[index];
-    index += 1;
-    if (!source || typeof source.content === "string" || source.content == null) return content;
-    const extra = openaiContentToVertexParts(source.content);
-    if (!extra.length) return content;
-    const existing = content.parts || [];
-    const merged = [];
-    const seen = new Set();
-    for (const part of [...extra, ...existing]) {
-      const key = part.text
-        ? `t:${part.text}`
-        : part.inlineData
-          ? `i:${part.inlineData.data?.slice?.(0, 24)}`
-          : part.fileData
-            ? `f:${part.fileData.fileUri}`
-            : JSON.stringify(part);
-      if (seen.has(key)) continue;
-      seen.add(key);
-      merged.push(part);
-    }
-    return { ...content, parts: merged.length ? merged : existing };
-  });
-}
-
 export function openaiToVertex(body, { model, effort } = {}) {
   const { system, contents } = openaiMessagesToGemini(body.messages || []);
   return wrapVertexGenerate({
     model,
-    contents: applyVertexParts(contents, body.messages || []),
+    contents,
     system,
     generation: generationFromChat(body, { model, effort }),
     tools: toolsFromOpenai(body),
@@ -362,7 +357,7 @@ export function anthropicToVertex(body, { model, effort } = {}) {
   );
   return wrapVertexGenerate({
     model,
-    contents: applyVertexParts(contents, body.messages || []),
+    contents,
     system,
     generation,
     tools: toolsFromAnthropic(body),

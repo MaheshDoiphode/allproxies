@@ -76,8 +76,10 @@ test("anthropic image blocks become Vertex inlineData", () => {
     { model: "gemini-3.8-flash" },
   );
   const body = vertexHttpBody(wrapped);
-  assert.equal(body.contents[0].parts[0].text, "whats in the image ?");
-  assert.deepEqual(body.contents[0].parts[1].inlineData, { mimeType: "image/jpeg", data: "abc123" });
+  const parts = body.contents[0].parts;
+  assert.equal(parts.filter((p) => p.inlineData).length, 1);
+  assert.equal(parts[0].text, "whats in the image ?");
+  assert.deepEqual(parts[1].inlineData, { mimeType: "image/jpeg", data: "abc123" });
 });
 
 test("parallel anthropic tool calls and results are grouped into matching turns", () => {

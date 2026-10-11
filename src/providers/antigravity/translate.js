@@ -244,17 +244,34 @@ export function anthropicToGemini(body) {
       const media = [];
       for (const part of content) {
         if (part && part.type === "tool_result") {
-          const raw = typeof part.content === "string" ? part.content : JSON.stringify(part.content ?? "");
+          let textResult = "";
+          if (typeof part.content === "string") {
+            textResult = part.content;
+          } else if (Array.isArray(part.content)) {
+            const subTexts = [];
+            for (const sub of part.content) {
+              if (!sub || typeof sub !== "object") continue;
+              if (sub.type === "text" && sub.text) subTexts.push(sub.text);
+              else if (sub.type === "image" || sub.type === "image_url" || sub.type === "input_image" || sub.type === "base64" || sub.source) {
+                media.push(sub);
+              } else {
+                subTexts.push(JSON.stringify(sub));
+              }
+            }
+            textResult = subTexts.join("\n") || "Tool executed successfully";
+          } else {
+            textResult = JSON.stringify(part.content ?? "");
+          }
           normalized.push({
             role: "tool",
             tool_call_id: part.tool_use_id,
             name: part.name,
-            content: raw,
+            content: textResult,
           });
         } else if (part && part.type === "text") leftovers.push(part.text || "");
         else if (part && (part.type === "image" || part.type === "image_url" || part.type === "input_image" || part.type === "base64" || part.source)) {
           media.push(part);
-        } else if (part) leftovers.push(part);
+        }
       }
       if (leftovers.length || media.length) {
         const bits = leftovers.map((item) => typeof item === "string" ? { type: "text", text: item } : item);
@@ -267,8 +284,35 @@ export function anthropicToGemini(body) {
   return openaiMessagesToGemini(normalized);
 }
 
+function estimateTurnSize(turn) {
+  let chars = 0;
+  for (const part of turn?.parts || []) {
+    if (!part || typeof part !== "object") continue;
+    if (typeof part.text === "string") chars += part.text.length;
+    else if (part.functionCall?.args) chars += JSON.stringify(part.functionCall.args).length;
+    else if (part.functionResponse?.response) chars += JSON.stringify(part.functionResponse.response).length;
+    else if (part.inlineData?.data) chars += Math.ceil((part.inlineData.data.length * 3) / 4 / 750) * 4;
+  }
+  return chars;
+}
+
+export function pruneContentsIfTooLarge(contents, maxChars = 3_200_000) {
+  if (!Array.isArray(contents) || contents.length <= 2) return contents;
+  let totalChars = 0;
+  for (const turn of contents) totalChars += estimateTurnSize(turn);
+  if (totalChars <= maxChars) return contents;
+
+  const pruned = [...contents];
+  while (pruned.length > 2 && totalChars > maxChars) {
+    const dropped = pruned.splice(1, 1)[0];
+    totalChars -= estimateTurnSize(dropped);
+  }
+  return normalizeContents(pruned);
+}
+
 export function wrapGenerate({ model, project, contents, system, generation, tools, sessionId, requestType }) {
-  const request = { contents };
+  const safeContents = pruneContentsIfTooLarge(contents);
+  const request = { contents: safeContents };
   if (system) request.systemInstruction = system;
   if (generation) request.generationConfig = generation;
   if (tools) request.tools = sanitizeTools(tools);
