@@ -559,25 +559,49 @@ export class VertexClient {
 
   async *messagesStream(body) {
     const resolved = await this.resolveRequestModel(body);
-    const acc = new AnthropicStreamAccumulator(resolved.model);
     const bundle = this.requireBundle();
+    const wrapped = anthropicToVertex(body, resolved);
+    // Gemini sometimes ends a turn with no parts at all (MALFORMED_FUNCTION_CALL, empty STOP).
+    // Nothing is sent to the client until the first real content arrives, so those turns can be
+    // retried transparently instead of surfacing as "Sorry, no response was returned."
+    const maxAttempts = 3;
+    let acc;
     let opened = false;
-    try {
-      for await (const event of withIdlePings(this.stream(anthropicToVertex(body, resolved)))) {
-        if (event?.__ping) {
-          if (opened) yield formatSse("ping", { type: "ping" });
-          continue;
+    for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+      acc = new AnthropicStreamAccumulator(resolved.model);
+      const held = [];
+      opened = false;
+      try {
+        for await (const event of withIdlePings(this.stream(wrapped))) {
+          if (event?.__ping) {
+            if (opened) yield formatSse("ping", { type: "ping" });
+            continue;
+          }
+          for (const item of acc.ingest(event)) {
+            if (opened) {
+              yield formatSse(item.type, item);
+            } else {
+              held.push(item);
+            }
+          }
+          if (!opened && acc.hasContent) {
+            opened = true;
+            for (const item of held.splice(0)) yield formatSse(item.type, item);
+          }
         }
-        for (const item of acc.ingest(event)) {
-          opened = true;
-          yield formatSse(item.type, item);
-        }
+      } catch (err) {
+        if (!opened) throw err;
+        yield anthropicErrorEvent(err);
+        for (const item of acc.finish()) yield formatSse(item.type, item);
+        return;
       }
-    } catch (err) {
-      if (!opened) throw err;
-      yield anthropicErrorEvent(err);
-      for (const item of acc.finish()) yield formatSse(item.type, item);
-      return;
+      if (opened || attempt === maxAttempts) {
+        if (!opened) {
+          for (const item of held) yield formatSse(item.type, item);
+          opened = held.length > 0;
+        }
+        break;
+      }
     }
     if (!opened) {
       for (const event of acc.start()) {

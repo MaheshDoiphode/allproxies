@@ -3,6 +3,7 @@ import test from "node:test";
 import {
   AnthropicStreamAccumulator,
   StreamAccumulator,
+  anthropicToGemini,
   anthropicToUpstream,
   geminiToAnthropic,
   geminiToOpenai,
@@ -233,13 +234,57 @@ test("anthropic stream signs thinking blocks before stop", () => {
   assert.ok(done.some((item) => item.type === "content_block_stop" && item.index === 0));
 });
 
+test("tool result images stay in the same user turn as the functionResponse", () => {
+  const png = "iVBORw0KGgo=";
+  const { contents } = anthropicToGemini({
+    messages: [
+      { role: "user", content: "look" },
+      { role: "assistant", content: [{ type: "tool_use", id: "c1", name: "shot", input: {} }] },
+      {
+        role: "user",
+        content: [
+          {
+            type: "tool_result",
+            tool_use_id: "c1",
+            content: [
+              { type: "image", source: { type: "base64", media_type: "image/png", data: png } },
+              { type: "text", text: "done" },
+            ],
+          },
+        ],
+      },
+    ],
+  });
+  assert.deepEqual(contents.map((turn) => turn.role), ["user", "model", "user"]);
+  assert.ok(contents[2].parts[0].functionResponse);
+  assert.equal(contents[2].parts[1].inlineData.data, png);
+});
+
+test("image envelope sent as text becomes an image part", () => {
+  const data = "A".repeat(200);
+  const envelope = JSON.stringify({ type: "image", source: { type: "base64", media_type: "image/jpeg", data } });
+  const { contents } = anthropicToGemini({
+    messages: [{ role: "user", content: [{ type: "text", text: "<attachments>" }, { type: "text", text: envelope }, { type: "text", text: "hi" }] }],
+  });
+  assert.equal(contents.length, 1);
+  assert.deepEqual(contents[0].parts.map((part) => (part.inlineData ? "image" : part.text)), ["<attachments>", "image", "hi"]);
+  assert.equal(contents[0].parts[1].inlineData.mimeType, "image/jpeg");
+});
+
 test("anthropic stream finish only closes opened blocks", () => {
   const empty = new AnthropicStreamAccumulator("m");
   assert.equal(empty.start()[0].type, "message_start");
   const emptyDone = empty.finish();
-  assert.equal(emptyDone[0].type, "message_delta");
-  assert.ok(!emptyDone.some((item) => item.type === "content_block_stop"));
+  // An empty turn must still carry one text block, otherwise VS Code says "no response was returned".
+  assert.deepEqual(emptyDone.map((item) => item.type), ["content_block_start", "content_block_delta", "content_block_stop", "message_delta", "message_stop"]);
+  assert.match(emptyDone[1].delta.text, /no output/);
   assert.ok(emptyDone.some((item) => item.type === "message_stop"));
+
+  const malformed = new AnthropicStreamAccumulator("m");
+  malformed.start();
+  malformed.ingest({ response: { candidates: [{ content: { role: "model" }, finishReason: "MALFORMED_FUNCTION_CALL" }] } });
+  assert.equal(malformed.hasContent, false);
+  assert.match(malformed.finish()[1].delta.text, /MALFORMED_FUNCTION_CALL/);
 
   const acc = new AnthropicStreamAccumulator("m");
   acc.start();

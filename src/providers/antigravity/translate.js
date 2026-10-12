@@ -61,19 +61,40 @@ function imagePart(url) {
   return { fileData: { fileUri: url, mimeType: "image/png" } };
 }
 
+// VS Code serializes attached images as a *text* part whose content is the JSON of an Anthropic
+// image block. Sent as text, a ~400 KB base64 PNG costs ~290K tokens instead of ~1K as an image.
+function embeddedImagePart(text) {
+  if (typeof text !== "string" || text.length < 100 || text[0] !== "{") return null;
+  if (!text.startsWith('{"type":"image"') && !text.startsWith('{ "type": "image"')) return null;
+  try {
+    const parsed = JSON.parse(text);
+    const source = parsed?.source;
+    if (parsed?.type === "image" && source?.type === "base64" && typeof source.data === "string" && source.data) {
+      return { inlineData: { mimeType: source.media_type || source.mime_type || "image/png", data: source.data } };
+    }
+  } catch {
+    // not an image envelope; keep it as text
+  }
+  return null;
+}
+
+function textOrEmbeddedImagePart(text) {
+  return embeddedImagePart(text) || textPart(text);
+}
+
 export function openaiContentToParts(content) {
   if (content == null) return [];
-  if (typeof content === "string") return content ? [textPart(content)] : [];
+  if (typeof content === "string") return content ? [textOrEmbeddedImagePart(content)] : [];
   if (!Array.isArray(content)) return [];
   const parts = [];
   for (const item of content) {
     if (typeof item === "string") {
-      parts.push(textPart(item));
+      parts.push(textOrEmbeddedImagePart(item));
       continue;
     }
     if (!item || typeof item !== "object") continue;
     const kind = item.type;
-    if (["text", "input_text", "output_text"].includes(kind) && item.text) parts.push(textPart(String(item.text)));
+    if (["text", "input_text", "output_text"].includes(kind) && item.text) parts.push(textOrEmbeddedImagePart(String(item.text)));
     else if (kind === "image_url" || kind === "image" || kind === "input_image" || kind === "base64") {
       let url = item.image_url ?? item.url;
       if (url && typeof url === "object") url = url.url;
@@ -204,7 +225,16 @@ export function openaiMessagesToGemini(messages) {
         thoughtSignature: SKIP_THOUGHT_SIGNATURE,
       });
     }
-    contents.push({ role: role === "assistant" ? "model" : "user", parts: parts.length ? parts : [textPart("")] });
+    const turnRole = role === "assistant" ? "model" : "user";
+    const last = contents[contents.length - 1];
+    // Tool results are emitted as functionResponse turns and any media from the tool result (e.g. a
+    // screenshot) follows as a user message. Gemini misbehaves (MALFORMED_FUNCTION_CALL / empty
+    // output) when that image sits in its own consecutive user turn, so fold it into the previous one.
+    if (turnRole === "user" && last && last.role === "user" && Array.isArray(last.parts)) {
+      last.parts.push(...parts);
+    } else {
+      contents.push({ role: turnRole, parts: parts.length ? parts : [textPart("")] });
+    }
   }
 
   return {
@@ -426,6 +456,11 @@ export function partsToToolCalls(parts) {
   return calls;
 }
 
+export function emptyResponseNotice(reason) {
+  const why = reason && reason !== "STOP" ? ` (upstream finishReason: ${reason})` : "";
+  return `The model returned no output${why}. Please retry.`;
+}
+
 export function finishReason(raw, tools) {
   if (tools) return "tool_calls";
   const mapping = {
@@ -516,7 +551,9 @@ export function geminiToAnthropic(payload, model) {
     type: "message",
     role: "assistant",
     model,
-    content: content.length ? content : [{ type: "text", text: "" }],
+    content: content.some((part) => part.type !== "thinking")
+      ? content
+      : [...content, { type: "text", text: emptyResponseNotice(String(first.finishReason || "").toUpperCase()) }],
     stop_reason: stop,
     usage,
   };
@@ -548,6 +585,11 @@ export class AnthropicStreamAccumulator {
     this.started = false;
     this.seenCallIds = new Set();
     this.thinkingSignatureSent = false;
+    this.upstreamFinish = null;
+  }
+
+  get hasContent() {
+    return Boolean(this.seenText || this.seenThoughts || this.seenCallIds.size);
   }
 
   start() {
@@ -636,7 +678,8 @@ export class AnthropicStreamAccumulator {
       events.push({ type: "content_block_stop", index });
     }
     if (candidates[0].finishReason) {
-      if (this.stop !== "tool_use" && String(candidates[0].finishReason).toUpperCase() === "MAX_TOKENS") this.stop = "max_tokens";
+      this.upstreamFinish = String(candidates[0].finishReason).toUpperCase();
+      if (this.stop !== "tool_use" && this.upstreamFinish === "MAX_TOKENS") this.stop = "max_tokens";
     }
     return events;
   }
@@ -654,7 +697,27 @@ export class AnthropicStreamAccumulator {
       }
       events.push({ type: "content_block_stop", index: this.thinkIndex });
     }
-    if (this.textIndex != null) events.push({ type: "content_block_stop", index: this.textIndex });
+    // If the model produced no visible output (only thoughts, or nothing at all), emit a fallback
+    // text block so clients requiring content (like VS Code Copilot) don't report
+    // "Sorry, no response was returned."
+    if (this.textIndex == null && this.seenCallIds.size === 0) {
+      const idx = this.block;
+      this.block += 1;
+      const fallbackText = this.seenThoughts.trim() || emptyResponseNotice(this.upstreamFinish);
+      events.push({
+        type: "content_block_start",
+        index: idx,
+        content_block: { type: "text", text: "" },
+      });
+      events.push({
+        type: "content_block_delta",
+        index: idx,
+        delta: { type: "text_delta", text: fallbackText },
+      });
+      events.push({ type: "content_block_stop", index: idx });
+    } else if (this.textIndex != null) {
+      events.push({ type: "content_block_stop", index: this.textIndex });
+    }
     events.push({
       type: "message_delta",
       delta: { stop_reason: this.stop, stop_sequence: null },
