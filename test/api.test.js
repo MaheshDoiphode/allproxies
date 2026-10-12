@@ -361,6 +361,53 @@ test("live models merge", async () => {
   }
 });
 
+test("large image bodies are accepted and oversized bodies get a 413, not a reset", async () => {
+  const dir = tempDir();
+  let seen = 0;
+  const upstream = await mockServer(({ url, json, res }) => {
+    if (url.pathname.endsWith(":generateContent")) {
+      seen = json.request.contents[0].parts[1].inlineData.data.length;
+      sendJson(res, 200, UPSTREAM);
+      return;
+    }
+    sendJson(res, 404, {});
+  });
+  const client = testClient(dir, { antigravityBaseUrl: upstream.url });
+  const settings = { ...client.settings, maxBodyBytes: 12 * 1024 * 1024 };
+  const api = await startApi(dir, { client, settings });
+  const send = (size) =>
+    request(api.url, "/v1/messages", {
+      method: "POST",
+      headers: { Authorization: "Bearer test-key" },
+      json: {
+        model: "gemini-3.8-flash",
+        max_tokens: 16,
+        messages: [
+          {
+            role: "user",
+            content: [
+              { type: "text", text: "hi" },
+              { type: "image", source: { type: "base64", media_type: "image/png", data: "A".repeat(size) } },
+            ],
+          },
+        ],
+      },
+    });
+  try {
+    // 10 MB of base64 is above the old 8 MB cap and must now pass through intact.
+    const big = await send(10 * 1024 * 1024);
+    assert.equal(big.status, 200);
+    assert.equal(seen, 10 * 1024 * 1024);
+    // Past the limit the proxy must answer with a readable 413 instead of dropping the socket.
+    const huge = await send(14 * 1024 * 1024);
+    assert.equal(huge.status, 413);
+    assert.match(huge.json.error.message, /too large/);
+  } finally {
+    await api.close();
+    await upstream.close();
+  }
+});
+
 test("missing login returns 401", async () => {
   const dir = tempDir();
   const tokenPath = writeToken(dir);

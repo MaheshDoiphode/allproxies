@@ -83,8 +83,8 @@ function requireApiKey(req, settings) {
   }
 }
 
-async function readJson(req) {
-  const raw = await readBody(req);
+async function readJsonBody(req, limit) {
+  const raw = await readBody(req, limit);
   if (!raw) return {};
   try {
     return JSON.parse(raw);
@@ -95,6 +95,7 @@ async function readJson(req) {
 
 export function createApp({ settings, client, chatgpt = null, vertex = null }) {
   const admin = createAdmin({ settings, client, chatgpt, vertex });
+  const readJson = (req) => readJsonBody(req, settings.maxBodyBytes);
   return createServer(async (req, res) => {
     const url = new URL(req.url || "/", "http://localhost");
     const path = url.pathname;

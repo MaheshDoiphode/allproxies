@@ -51,6 +51,7 @@ export function loadSettings(overrides = {}) {
     antigravityBaseUrl: (overrides.antigravityBaseUrl ?? env.ALLPROXIES_ANTIGRAVITY_BASE_URL ?? "").replace(/\/$/, ""),
     antigravityHubVersion: overrides.antigravityHubVersion ?? env.ALLPROXIES_ANTIGRAVITY_HUB_VERSION ?? "2.9.1",
     requestTimeoutMs: Number(overrides.requestTimeoutMs ?? env.ALLPROXIES_REQUEST_TIMEOUT_MS ?? 180_000),
+    maxBodyBytes: Math.round(Number(overrides.maxBodyMb ?? env.ALLPROXIES_MAX_BODY_MB ?? 256) * 1024 * 1024),
     liveModels: parseBool(overrides.liveModels ?? env.ALLPROXIES_LIVE_MODELS, true),
     debugRequests: parseBool(overrides.debugRequests ?? env.ALLPROXIES_DEBUG_REQUESTS, false),
     adminPassword: overrides.adminPassword ?? env.ALLPROXIES_ADMIN_PASSWORD ?? "",

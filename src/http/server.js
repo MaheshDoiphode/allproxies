@@ -1,19 +1,32 @@
 import http from "node:http";
+import { HttpError } from "../core/errors.js";
 
-export function readBody(req, limit = 8 * 1024 * 1024) {
+export const DEFAULT_MAX_BODY_BYTES = 256 * 1024 * 1024;
+
+// Over-limit bodies are drained (not buffered) and rejected with a 413 once fully received.
+// Destroying the socket instead makes clients see net::ERR_CONNECTION_RESET with no explanation.
+export function readBody(req, limit = DEFAULT_MAX_BODY_BYTES) {
   return new Promise((resolve, reject) => {
     const chunks = [];
     let size = 0;
+    let tooLarge = false;
     req.on("data", (chunk) => {
       size += chunk.length;
       if (size > limit) {
-        reject(new Error("Request body too large"));
-        req.destroy();
+        tooLarge = true;
+        chunks.length = 0;
         return;
       }
       chunks.push(chunk);
     });
-    req.on("end", () => resolve(Buffer.concat(chunks).toString("utf8")));
+    req.on("end", () => {
+      if (tooLarge) {
+        const mb = (n) => (n / (1024 * 1024)).toFixed(1);
+        reject(new HttpError(413, `Request body too large: ${mb(size)} MB exceeds the ${mb(limit)} MB limit (ALLPROXIES_MAX_BODY_MB)`, { type: "request_too_large" }));
+        return;
+      }
+      resolve(Buffer.concat(chunks).toString("utf8"));
+    });
     req.on("error", reject);
   });
 }
