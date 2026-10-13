@@ -95,6 +95,10 @@ export function openaiContentToParts(content) {
     if (!item || typeof item !== "object") continue;
     const kind = item.type;
     if (["text", "input_text", "output_text"].includes(kind) && item.text) parts.push(textOrEmbeddedImagePart(String(item.text)));
+    else if (kind === "thinking" || kind === "reasoning") {
+      const thought = item.thinking || item.text || item.reasoning;
+      if (thought) parts.push(textPart(String(thought), true));
+    }
     else if (kind === "image_url" || kind === "image" || kind === "input_image" || kind === "base64") {
       let url = item.image_url ?? item.url;
       if (url && typeof url === "object") url = url.url;
@@ -115,20 +119,68 @@ export function openaiContentToParts(content) {
 
 const CONTINUE_AFTER_MODEL = "(continue)";
 
-export function normalizeContents(contents) {
-  if (!contents.length) return [{ role: "user", parts: [{ text: "" }] }];
-  if (contents[0].role === "model") contents.unshift({ role: "user", parts: [{ text: "" }] });
+function attachPartToFunctionResponse(fnResp, part) {
+  if (!fnResp || !part || typeof part !== "object") return false;
+  const media = part.inlineData ? { inlineData: part.inlineData } : part.fileData ? { fileData: part.fileData } : null;
+  if (media) {
+    if (!Array.isArray(fnResp.parts)) fnResp.parts = [];
+    fnResp.parts.push(media);
+    return true;
+  }
+  if (typeof part.text === "string" && part.text) {
+    if (!fnResp.response || typeof fnResp.response !== "object" || Array.isArray(fnResp.response)) {
+      fnResp.response = { result: fnResp.response ?? "" };
+    }
+    fnResp.response.context = fnResp.response.context ? `${fnResp.response.context}\n${part.text}` : part.text;
+    return true;
+  }
+  return false;
+}
 
-  for (let i = 0; i < contents.length; i += 1) {
-    const turn = contents[i];
+function isValidContent(content) {
+  if (!content || !Array.isArray(content.parts) || !content.parts.length) return false;
+  return content.parts.some((part) => part && typeof part === "object" && Object.keys(part).length > 0);
+}
+
+function extractCuratedHistory(history) {
+  if (!Array.isArray(history) || !history.length) return [];
+  const curated = [];
+  let i = 0;
+  while (i < history.length) {
+    const turn = history[i];
+    if (turn?.role === "user") {
+      if (isValidContent(turn)) curated.push(turn);
+      i += 1;
+      continue;
+    }
+    const modelOutput = [];
+    let valid = true;
+    while (i < history.length && history[i]?.role === "model") {
+      modelOutput.push(history[i]);
+      if (!isValidContent(history[i])) valid = false;
+      i += 1;
+    }
+    if (valid && modelOutput.length) curated.push(...modelOutput);
+    else if (!valid) curated.pop();
+  }
+  return curated;
+}
+
+export function normalizeContents(contents) {
+  const curated = extractCuratedHistory(Array.isArray(contents) ? contents : []);
+  if (!curated.length) return [{ role: "user", parts: [{ text: "" }] }];
+  if (curated[0].role === "model") curated.unshift({ role: "user", parts: [{ text: "" }] });
+
+  for (let i = 0; i < curated.length; i += 1) {
+    const turn = curated[i];
     if (turn?.role !== "model" || !Array.isArray(turn.parts)) continue;
     const calls = turn.parts.filter((p) => p && p.functionCall).map((p) => p.functionCall);
     if (!calls.length) continue;
 
-    let next = contents[i + 1];
+    let next = curated[i + 1];
     if (!next || next.role !== "user" || !Array.isArray(next.parts) || !next.parts.some((p) => p && p.functionResponse)) {
       next = { role: "user", parts: [] };
-      contents.splice(i + 1, 0, next);
+      curated.splice(i + 1, 0, next);
     }
 
     const respondedIds = new Set(next.parts.map((p) => p.functionResponse?.id).filter(Boolean));
@@ -145,29 +197,40 @@ export function normalizeContents(contents) {
         });
       }
     }
-    const currentResponses = next.parts.filter((p) => p && p.functionResponse);
-    while (currentResponses.length < calls.length) {
-      const missingCall = calls[currentResponses.length];
-      const placeholder = {
-        functionResponse: {
-          name: missingCall?.name || "tool",
-          response: { output: "" },
-          ...(missingCall?.id ? { id: missingCall.id } : {}),
-        },
-      };
-      next.parts.push(placeholder);
-      currentResponses.push(placeholder);
+      const currentResponses = next.parts.filter((p) => p && p.functionResponse);
+      while (currentResponses.length < calls.length) {
+        const missingCall = calls[currentResponses.length];
+        const placeholder = {
+          functionResponse: {
+            name: missingCall?.name || "tool",
+            response: { output: "" },
+            ...(missingCall?.id ? { id: missingCall.id } : {}),
+          },
+        };
+        next.parts.push(placeholder);
+        currentResponses.push(placeholder);
+      }
+
+      if (next.parts.some((p) => p && !p.functionResponse)) {
+        const lastFr = currentResponses[currentResponses.length - 1]?.functionResponse;
+        const kept = [];
+        for (const part of next.parts) {
+          if (part?.functionResponse) {
+            kept.push(part);
+          } else if (lastFr) {
+            attachPartToFunctionResponse(lastFr, part);
+          }
+        }
+        next.parts = kept;
+      }
     }
-  }
 
-  // Gemini generateContent requires the last turn to be user. Clients that
-  // interrupt a stream resend the partial assistant reply as the last message.
-  const last = contents[contents.length - 1];
+  const last = curated[curated.length - 1];
   if (last?.role === "model") {
-    contents.push({ role: "user", parts: [{ text: CONTINUE_AFTER_MODEL }] });
+    curated.push({ role: "user", parts: [{ text: CONTINUE_AFTER_MODEL }] });
   }
 
-  return contents;
+  return curated;
 }
 
 export function openaiMessagesToGemini(messages) {
@@ -201,6 +264,12 @@ export function openaiMessagesToGemini(messages) {
         : { result: parsed };
       const response = { name, response: wrapped };
       if (toolId) response.id = toolId;
+      if (Array.isArray(message.media) && message.media.length) {
+        const mediaParts = openaiContentToParts(message.media)
+          .map((p) => (p.inlineData ? { inlineData: p.inlineData } : p.fileData ? { fileData: p.fileData } : null))
+          .filter(Boolean);
+        if (mediaParts.length) response.parts = mediaParts;
+      }
       const respPart = { functionResponse: response };
 
       const last = contents[contents.length - 1];
@@ -236,13 +305,19 @@ export function openaiMessagesToGemini(messages) {
     }
     const turnRole = role === "assistant" ? "model" : "user";
     const last = contents[contents.length - 1];
-    // Tool results are emitted as functionResponse turns and any media from the tool result (e.g. a
-    // screenshot) follows as a user message. Gemini misbehaves (MALFORMED_FUNCTION_CALL / empty
-    // output) when that image sits in its own consecutive user turn, so fold it into the previous one.
+    // Per Google's FunctionResponse spec (libs/js-genai/src/types.ts), function-response turns must
+    // contain only functionResponse parts; any tool media/notes belong inside FunctionResponse.parts
+    // or FunctionResponse.response rather than as sibling inlineData/text parts on the Content turn.
     if (turnRole === "user" && last && last.role === "user" && Array.isArray(last.parts)) {
-      last.parts.push(...parts);
-    } else {
-      contents.push({ role: turnRole, parts: parts.length ? parts : [textPart("")] });
+      const frParts = last.parts.filter((p) => p && p.functionResponse);
+      if (frParts.length) {
+        const lastFr = frParts[frParts.length - 1].functionResponse;
+        for (const part of parts) attachPartToFunctionResponse(lastFr, part);
+      } else {
+        last.parts.push(...parts);
+      }
+    } else if (parts.length) {
+      contents.push({ role: turnRole, parts });
     }
   }
 
@@ -265,11 +340,15 @@ export function anthropicToGemini(body) {
     const content = message.content;
     if (role === "assistant" && Array.isArray(content)) {
       const toolCalls = [];
-      const texts = [];
+      const parts = [];
       for (const part of content) {
         if (!part || typeof part !== "object") continue;
-        if (part.type === "text") texts.push(part.text || "");
-        else if (part.type === "tool_use") {
+        if (part.type === "text") {
+          if (part.text) parts.push({ type: "text", text: part.text });
+        } else if (part.type === "thinking" || part.type === "reasoning") {
+          const thought = part.thinking || part.text || part.reasoning;
+          if (thought) parts.push({ type: "thinking", thinking: thought });
+        } else if (part.type === "tool_use") {
           toolCalls.push({
             id: part.id,
             type: "function",
@@ -277,13 +356,14 @@ export function anthropicToGemini(body) {
           });
         }
       }
-      normalized.push({ role: "assistant", content: texts.join("\n"), tool_calls: toolCalls });
+      normalized.push({ role: "assistant", content: parts, tool_calls: toolCalls });
     } else if (role === "user" && Array.isArray(content)) {
       const leftovers = [];
       const media = [];
       for (const part of content) {
         if (part && part.type === "tool_result") {
           let textResult = "";
+          const toolMedia = [];
           if (typeof part.content === "string") {
             textResult = part.content;
           } else if (Array.isArray(part.content)) {
@@ -292,7 +372,7 @@ export function anthropicToGemini(body) {
               if (!sub || typeof sub !== "object") continue;
               if (sub.type === "text" && sub.text) subTexts.push(sub.text);
               else if (sub.type === "image" || sub.type === "image_url" || sub.type === "input_image" || sub.type === "base64" || sub.source) {
-                media.push(sub);
+                toolMedia.push(sub);
               } else {
                 subTexts.push(JSON.stringify(sub));
               }
@@ -306,6 +386,7 @@ export function anthropicToGemini(body) {
             tool_call_id: part.tool_use_id,
             name: part.name,
             content: textResult,
+            ...(toolMedia.length ? { media: toolMedia } : {}),
           });
         } else if (part && part.type === "text") leftovers.push(part.text || "");
         else if (part && (part.type === "image" || part.type === "image_url" || part.type === "input_image" || part.type === "base64" || part.source)) {
@@ -329,7 +410,12 @@ function estimateTurnSize(turn) {
     if (!part || typeof part !== "object") continue;
     if (typeof part.text === "string") chars += part.text.length;
     else if (part.functionCall?.args) chars += JSON.stringify(part.functionCall.args).length;
-    else if (part.functionResponse?.response) chars += JSON.stringify(part.functionResponse.response).length;
+    else if (part.functionResponse) {
+      if (part.functionResponse.response) chars += JSON.stringify(part.functionResponse.response).length;
+      for (const sub of part.functionResponse.parts || []) {
+        if (sub?.inlineData?.data) chars += Math.ceil((sub.inlineData.data.length * 3) / 4 / 750) * 4;
+      }
+    }
     else if (part.inlineData?.data) chars += Math.ceil((part.inlineData.data.length * 3) / 4 / 750) * 4;
   }
   return chars;

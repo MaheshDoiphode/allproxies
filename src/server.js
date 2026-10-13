@@ -187,7 +187,13 @@ export function createApp({ settings, client, chatgpt = null, vertex = null }) {
     if (req.method === "POST" && (path === "/v1/chat/completions" || path === "/chat/completions" || path === "/openai/v1/chat/completions")) {
       const body = req.body || await readJson(req);
       const target = pickClient(body, { client, chatgpt, vertex });
-      if (settings.debugRequests) console.log(`[req] ${path} model=${body.model} stream=${Boolean(body.stream)} effort=${body.reasoning_effort || body.reasoning?.effort || body.output_config?.effort || ""}`);
+      if (settings.debugRequests) {
+        const roles = (body.messages || []).map((item) => {
+          const kinds = Array.isArray(item.content) ? item.content.map((part) => part?.type || typeof part) : [typeof item.content];
+          return `${item.role}[${kinds.join("+")}${item.tool_calls?.length ? `+tools${item.tool_calls.length}` : ""}]`;
+        });
+        console.log(`[req] ${path} model=${body.model} stream=${Boolean(body.stream)} effort=${body.reasoning_effort || body.reasoning?.effort || body.output_config?.effort || ""} messages=${roles.join(" -> ")}`);
+      }
       if (isStreaming(body)) {
         await pipeSse(res, target.chatCompletionsStream(body));
         return;
@@ -202,8 +208,11 @@ export function createApp({ settings, client, chatgpt = null, vertex = null }) {
       if (settings.debugRequests) {
         const thinking = body.thinking && typeof body.thinking === "object" ? `${body.thinking.type || ""}/${body.thinking.effort || body.thinking.budget_tokens || ""}` : "";
         const tools = Array.isArray(body.tools) ? body.tools.length : 0;
-        const kinds = (body.messages || []).flatMap((item) => Array.isArray(item.content) ? item.content.map((part) => part?.type) : [item.role]);
-        console.log(`[req] ${path} model=${body.model} stream=${Boolean(body.stream)} effort=${body.output_config?.effort || ""} thinking=${thinking} tools=${tools} parts=${kinds.join(",")}`);
+        const kinds = (body.messages || []).map((item) => {
+          const parts = Array.isArray(item.content) ? item.content.map((part) => part?.type || typeof part) : [item.role];
+          return `${item.role}[${parts.join("+")}]`;
+        });
+        console.log(`[req] ${path} model=${body.model} stream=${Boolean(body.stream)} effort=${body.output_config?.effort || ""} thinking=${thinking} tools=${tools} messages=${kinds.join(" -> ")}`);
       }
       if (isStreaming(body)) {
         await pipeSse(res, target.messagesStream(body));

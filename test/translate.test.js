@@ -285,8 +285,51 @@ test("claude requests send tool schemas as parametersJsonSchema, gemini keeps pa
   assert.ok(geminiDecl.parameters && !geminiDecl.parametersJsonSchema);
 });
 
-test("tool result images stay in the same user turn as the functionResponse", () => {
-  const png = "iVBORw0KGgo=";
+test("empty model turns are dropped instead of ending the request", () => {
+  const payload = openaiToUpstream(
+    {
+      messages: [
+        { role: "user", content: "look at this" },
+        { role: "assistant", content: "" },
+      ],
+    },
+    { model: "m", project: "p" },
+  );
+  assert.deepEqual(
+    payload.request.contents.map((item) => item.role),
+    ["user"],
+  );
+});
+
+test("anthropic thinking parts stay on the model turn", () => {
+  const payload = anthropicToUpstream(
+    {
+      model: "m",
+      max_tokens: 16,
+      messages: [
+        { role: "user", content: "q" },
+        {
+          role: "assistant",
+          content: [
+            { type: "thinking", thinking: "plan" },
+            { type: "text", text: "ok" },
+            { type: "tool_use", id: "c1", name: "shot", input: {} },
+          ],
+        },
+        { role: "user", content: [{ type: "tool_result", tool_use_id: "c1", content: "done" }] },
+      ],
+    },
+    { model: "m", project: "p" },
+  );
+  const modelTurn = payload.request.contents.find((item) => item.role === "model");
+  assert.equal(modelTurn.parts[0].thought, true);
+  assert.equal(modelTurn.parts[0].text, "plan");
+  assert.equal(modelTurn.parts[1].text, "ok");
+  assert.equal(modelTurn.parts[2].functionCall.name, "shot");
+});
+
+test("tool result images and trailing user parts attach to functionResponse.parts", () => {
+  const png = "A".repeat(200);
   const { contents } = anthropicToGemini({
     messages: [
       { role: "user", content: "look" },
@@ -302,13 +345,19 @@ test("tool result images stay in the same user turn as the functionResponse", ()
               { type: "text", text: "done" },
             ],
           },
+          { type: "text", text: JSON.stringify({ type: "image", source: { type: "base64", media_type: "image/png", data: png } }) },
+          { type: "text", text: "extra note" },
         ],
       },
     ],
   });
   assert.deepEqual(contents.map((turn) => turn.role), ["user", "model", "user"]);
+  assert.equal(contents[2].parts.length, 1);
   assert.ok(contents[2].parts[0].functionResponse);
-  assert.equal(contents[2].parts[1].inlineData.data, png);
+  assert.equal(contents[2].parts[0].functionResponse.parts.length, 2);
+  assert.equal(contents[2].parts[0].functionResponse.parts[0].inlineData.data, png);
+  assert.equal(contents[2].parts[0].functionResponse.parts[1].inlineData.data, png);
+  assert.equal(contents[2].parts[0].functionResponse.response.context, "extra note");
 });
 
 test("image envelope sent as text becomes an image part", () => {

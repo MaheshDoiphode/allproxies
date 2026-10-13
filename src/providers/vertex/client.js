@@ -523,9 +523,29 @@ export class VertexClient {
     return this.versioned(this.baseUrlFor(active), vertexStreamPath(model, this.routeOpts(active)));
   }
 
+  describeContents(contents) {
+    return (contents || []).map((turn, index) => ({
+      i: index,
+      role: turn?.role,
+      parts: (turn?.parts || []).map((part) => {
+        if (!part || typeof part !== "object") return { empty: true };
+        if (part.functionCall) return { functionCall: part.functionCall.name };
+        if (part.functionResponse) return { functionResponse: part.functionResponse.name };
+        if (part.inlineData || part.inline_data) return { inlineData: (part.inlineData || part.inline_data).mimeType || true };
+        if (part.fileData || part.file_data) return { fileData: true };
+        if (part.thought) return { thought: String(part.text || "").length };
+        if (typeof part.text === "string") return { text: part.text.length };
+        return { keys: Object.keys(part) };
+      }),
+    }));
+  }
+
   async generate(wrapped) {
     const bundle = this.requireBundle();
     const body = vertexHttpBody(wrapped);
+    if (this.settings.debugRequests) {
+      console.log(`[vertex] generate ${wrapped.model} last=${body.contents?.at?.(-1)?.role} turns=${this.describeContents(body.contents).map((t) => `${t.role}:${t.parts.map((p) => Object.keys(p)[0]).join("+")}`).join(",")}`);
+    }
     const response = await this.post(this.generateUrl(wrapped.model, bundle), body);
     return response.body ? JSON.parse(response.body) : {};
   }
@@ -533,6 +553,9 @@ export class VertexClient {
   async *stream(wrapped) {
     const bundle = this.requireBundle();
     const body = vertexHttpBody(wrapped);
+    if (this.settings.debugRequests) {
+      console.log(`[vertex] stream ${wrapped.model} last=${body.contents?.at?.(-1)?.role} turns=${this.describeContents(body.contents).map((t) => `${t.role}:${t.parts.map((p) => Object.keys(p)[0]).join("+")}`).join(",")}`);
+    }
     const response = await this.post(this.streamUrl(wrapped.model, bundle), body, { stream: true });
     try {
       for await (const event of iterateSse(response.stream)) yield event;

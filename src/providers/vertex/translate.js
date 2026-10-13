@@ -4,6 +4,7 @@ import {
   anthropicToGemini,
   geminiToAnthropic,
   geminiToOpenai,
+  normalizeContents,
   openaiMessagesToGemini,
   openaiToResponses,
   responsesToChatBody,
@@ -217,6 +218,19 @@ function rewriteGeminiMedia(contents) {
         if (part.fileData?.fileUri && !part.fileData.mimeType) {
           return { fileData: { ...part.fileData, mimeType: guessMime(part.fileData.fileUri) } };
         }
+        if (part.functionResponse && Array.isArray(part.functionResponse.parts)) {
+          return {
+            functionResponse: {
+              ...part.functionResponse,
+              parts: part.functionResponse.parts.map((sub) => {
+                if (sub?.fileData?.fileUri && !sub.fileData.mimeType) {
+                  return { fileData: { ...sub.fileData, mimeType: guessMime(sub.fileData.fileUri) } };
+                }
+                return sub;
+              }),
+            },
+          };
+        }
         return part;
       }),
     };
@@ -303,7 +317,12 @@ function estimateTurnSize(turn) {
     if (!part || typeof part !== "object") continue;
     if (typeof part.text === "string") chars += part.text.length;
     else if (part.functionCall?.args) chars += JSON.stringify(part.functionCall.args).length;
-    else if (part.functionResponse?.response) chars += JSON.stringify(part.functionResponse.response).length;
+    else if (part.functionResponse) {
+      if (part.functionResponse.response) chars += JSON.stringify(part.functionResponse.response).length;
+      for (const sub of part.functionResponse.parts || []) {
+        if (sub?.inlineData?.data) chars += Math.ceil((sub.inlineData.data.length * 3) / 4 / 750) * 4;
+      }
+    }
     else if (part.inlineData?.data) chars += Math.ceil((part.inlineData.data.length * 3) / 4 / 750) * 4;
   }
   return chars;
@@ -320,7 +339,7 @@ export function pruneContentsIfTooLarge(contents, maxChars = 3_200_000) {
     const dropped = pruned.splice(1, 1)[0];
     totalChars -= estimateTurnSize(dropped);
   }
-  return pruned;
+  return normalizeContents(pruned);
 }
 
 export function wrapVertexGenerate({ model, contents, system, generation, tools }) {
