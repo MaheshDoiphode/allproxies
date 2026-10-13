@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import path from "node:path";
 import test from "node:test";
 import { VertexClient } from "../src/providers/vertex/client.js";
-import { TokenStore, createVertexBundle } from "../src/providers/vertex/tokens.js";
+import { TokenStore, createVertexBundle, vertexProjectOf } from "../src/providers/vertex/tokens.js";
 import { mockServer, request, sendJson, startApi, tempDir, testSettings } from "./helpers.js";
 
 function writeVertex(dir, extra = {}) {
@@ -10,6 +10,7 @@ function writeVertex(dir, extra = {}) {
   new TokenStore(tokenPath).save(createVertexBundle({
     api_key: extra.api_key || "AQ.test-key",
     location: extra.location || "global",
+    project_id: extra.project_id,
     label: extra.label || "vertex-test",
     email: extra.email || "vertex-test",
   }));
@@ -190,5 +191,75 @@ test("dashboard can add a vertex key without oauth", async () => {
     assert.ok(status.json.items.some((item) => item.provider === "vertex" && item.email === "desk"));
   } finally {
     await api.close();
+  }
+});
+
+test("vertex generateContent uses project-scoped path when project is stored", async () => {
+  const dir = tempDir();
+  let seen;
+  const up = await mockServer(({ req, url, json, res }) => {
+    seen = { path: url.pathname, key: req.headers["x-goog-api-key"], json };
+    sendJson(res, 200, {
+      candidates: [{ content: { parts: [{ text: "pong" }] }, finishReason: "STOP" }],
+    });
+  });
+  const tokenPath = writeVertex(dir, { project_id: "790050303616" });
+  const vertex = new VertexClient(testSettings(dir, {
+    vertexTokenPath: tokenPath,
+    vertexBaseUrl: up.url,
+    liveModels: false,
+  }));
+  try {
+    const out = await vertex.chatCompletions({
+      model: "vertex/gemini-4-argon",
+      messages: [{ role: "user", content: "Reply with exactly: pong" }],
+      reasoning_effort: "low",
+    });
+    assert.equal(out.choices[0].message.content, "pong");
+    assert.match(
+      seen.path,
+      /\/v1beta1\/projects\/790050303616\/locations\/global\/publishers\/google\/models\/gemini-4-argon:generateContent$/,
+    );
+  } finally {
+    await up.close();
+  }
+});
+
+test("vertex retries express 404 on the project-scoped path from the error", async () => {
+  const dir = tempDir();
+  const seen = [];
+  const up = await mockServer(({ url, res }) => {
+    seen.push(url.pathname);
+    if (!String(url.pathname).includes("/projects/")) {
+      sendJson(res, 404, {
+        error: {
+          code: 404,
+          status: "NOT_FOUND",
+          message: "Publisher model `projects/790050303616/locations/asia-southeast1/publishers/google/models/gemini-4-argon` was not found",
+        },
+      });
+      return;
+    }
+    sendJson(res, 200, {
+      candidates: [{ content: { parts: [{ text: "pong" }] }, finishReason: "STOP" }],
+    });
+  });
+  const tokenPath = writeVertex(dir);
+  const vertex = new VertexClient(testSettings(dir, {
+    vertexTokenPath: tokenPath,
+    vertexBaseUrl: up.url,
+    liveModels: false,
+  }));
+  try {
+    const out = await vertex.chatCompletions({
+      model: "vertex/gemini-4-argon",
+      messages: [{ role: "user", content: "Reply with exactly: pong" }],
+    });
+    assert.equal(out.choices[0].message.content, "pong");
+    assert.ok(seen.some((path) => path.includes("/publishers/google/models/gemini-4-argon") && !path.includes("/projects/")));
+    assert.ok(seen.some((path) => path.includes("/projects/790050303616/locations/global/publishers/google/models/gemini-4-argon")));
+    assert.equal(vertexProjectOf(vertex.activeAccount()), "790050303616");
+  } finally {
+    await up.close();
   }
 });

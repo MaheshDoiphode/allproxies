@@ -51,13 +51,24 @@ export function vertexAccountLabel(raw = {}) {
   return tail ? `vertex-…${tail}` : "vertex-key";
 }
 
+function vertexProjectFrom(raw = {}, packed = {}, location = "global") {
+  const candidates = [raw.project_id, packed.project_id, raw.managed_project_id, packed.managed_project_id];
+  for (const value of candidates) {
+    const next = String(value || "").trim();
+    if (next && next !== location) return next;
+  }
+  return "";
+}
+
 export function createVertexBundle(raw = {}) {
   const packed = unpackScope(raw.scope);
   const apiKey = raw.api_key || raw.refresh_token || packed.api_key || "";
   const location = raw.location || packed.location || "global";
+  const projectId = vertexProjectFrom(raw, packed, location);
   const extras = {
     api_key: apiKey,
     location,
+    project_id: projectId || packed.project_id || "",
     label: raw.label || packed.label || vertexAccountLabel({ ...raw, api_key: apiKey }),
   };
   const email = extras.label;
@@ -68,8 +79,8 @@ export function createVertexBundle(raw = {}) {
       refresh_token: apiKey,
       expires_at: Number(raw.expires_at || 4_000_000_000),
       email,
-      project_id: raw.project_id || packed.project_id || location,
-      managed_project_id: raw.managed_project_id || packed.managed_project_id || raw.project_id || location,
+      project_id: projectId || null,
+      managed_project_id: projectId || null,
       scope: JSON.stringify(extras),
     }),
     ...extras,
@@ -77,8 +88,8 @@ export function createVertexBundle(raw = {}) {
     refresh_token: apiKey,
     email,
     scope: JSON.stringify(extras),
-    project_id: raw.project_id || packed.project_id || location,
-    managed_project_id: raw.managed_project_id || packed.managed_project_id || raw.project_id || location,
+    project_id: projectId || null,
+    managed_project_id: projectId || null,
   };
 }
 
@@ -89,6 +100,7 @@ export function hydrateVertexBundle(bundle) {
     ...bundle,
     api_key: bundle.api_key || packed.api_key || bundle.refresh_token || bundle.access_token,
     location: bundle.location || packed.location || "global",
+    project_id: bundle.project_id || packed.project_id,
     label: bundle.label || packed.label || bundle.email,
   });
 }
@@ -100,4 +112,11 @@ export function vertexApiKeyOf(bundle) {
 
 export function vertexLocationOf(bundle) {
   return hydrateVertexBundle(bundle)?.location || "global";
+}
+
+export function vertexProjectOf(bundle) {
+  const hydrated = hydrateVertexBundle(bundle);
+  const project = String(hydrated?.project_id || hydrated?.managed_project_id || "").trim();
+  if (!project || project === vertexLocationOf(hydrated)) return "";
+  return project;
 }

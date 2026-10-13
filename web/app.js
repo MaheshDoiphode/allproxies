@@ -514,11 +514,12 @@
     const key = window.prompt("Vertex Express Mode API key (starts with AQ.)");
     if (!key) return;
     const location = window.prompt("Location (global)", "global") || "global";
+    const project = window.prompt("GCP project id (optional, needed for Gemini 4)", "") || undefined;
     const label = window.prompt("Label (optional)", "") || undefined;
     const hint = $("vertexLoginHint");
     if (hint) hint.classList.remove("hidden");
     try {
-      await api("/accounts/login-vertex", { method: "POST", body: { api_key: key.trim(), location, label } });
+      await api("/accounts/login-vertex", { method: "POST", body: { api_key: key.trim(), location, project, label } });
       toast("Vertex key added");
       await loadAll(false);
       await loadModels().catch(() => {});

@@ -1,8 +1,8 @@
 import assert from "node:assert/strict";
 import path from "node:path";
 import test from "node:test";
-import { vertexGeneratePath, vertexModelResource, vertexRegionalBase, vertexStreamPath } from "../src/core/vertex-constants.js";
-import { TokenStore, createVertexBundle, hydrateVertexBundle, vertexApiKeyOf, vertexLocationOf } from "../src/providers/vertex/tokens.js";
+import { parseVertexPublisherError, vertexGeneratePath, vertexModelResource, vertexRegionalBase, vertexStreamPath, withVertexProjectPath } from "../src/core/vertex-constants.js";
+import { TokenStore, createVertexBundle, hydrateVertexBundle, vertexApiKeyOf, vertexLocationOf, vertexProjectOf } from "../src/providers/vertex/tokens.js";
 import { loadStaticVertexCatalog, parseVertexModels, resolveVertexRoute } from "../src/providers/vertex/catalog.js";
 import { tempDir } from "./helpers.js";
 
@@ -13,6 +13,32 @@ test("vertex express paths stay on the global host", () => {
   assert.equal(vertexModelResource("gemini-3.8-flash"), "publishers/google/models/gemini-3.8-flash");
   assert.equal(vertexGeneratePath("gemini-3.8-flash"), "publishers/google/models/gemini-3.8-flash:generateContent");
   assert.match(vertexStreamPath("gemini-3.8-flash"), /streamGenerateContent\?alt=sse$/);
+  assert.equal(
+    vertexModelResource("gemini-4-argon", { project: "790050303616", location: "global" }),
+    "projects/790050303616/locations/global/publishers/google/models/gemini-4-argon",
+  );
+  assert.equal(
+    vertexGeneratePath("gemini-4-argon", { project: "790050303616", location: "global" }),
+    "projects/790050303616/locations/global/publishers/google/models/gemini-4-argon:generateContent",
+  );
+  assert.equal(
+    withVertexProjectPath(
+      "https://aiplatform.googleapis.com/v1beta1/publishers/google/models/gemini-4-argon:generateContent",
+      { project: "790050303616", location: "global" },
+    ),
+    "https://aiplatform.googleapis.com/v1beta1/projects/790050303616/locations/global/publishers/google/models/gemini-4-argon:generateContent",
+  );
+  assert.equal(vertexModelResource("gemini-4-argon", { project: "global" }), "publishers/google/models/gemini-4-argon");
+  assert.deepEqual(
+    parseVertexPublisherError({
+      parsed: {
+        error: {
+          message: "Publisher model `projects/790050303616/locations/asia-southeast1/publishers/google/models/gemini-4-argon` was not found",
+        },
+      },
+    }),
+    { project: "790050303616", location: "asia-southeast1", message: "Publisher model `projects/790050303616/locations/asia-southeast1/publishers/google/models/gemini-4-argon` was not found" },
+  );
 });
 
 test("vertex key store never prints the raw key as email", () => {
@@ -24,7 +50,25 @@ test("vertex key store never prints the raw key as email", () => {
   assert.equal(loaded.email, "work");
   assert.equal(vertexApiKeyOf(loaded), "AQ.Ab8RN6L1Q7uvsLfzPZRPUqOCl");
   assert.equal(vertexLocationOf(loaded), "global");
+  assert.equal(vertexProjectOf(loaded), "");
   assert.ok(!String(loaded.email).includes("AQ."));
+});
+
+test("vertex project is stored separately from location", () => {
+  const saved = createVertexBundle({
+    api_key: "AQ.Ab8RN6L1Q7uvsLfzPZRPUqOCl",
+    location: "global",
+    project_id: "790050303616",
+    label: "work",
+  });
+  assert.equal(vertexLocationOf(saved), "global");
+  assert.equal(vertexProjectOf(saved), "790050303616");
+  const rehydrated = hydrateVertexBundle({
+    ...saved,
+    location: undefined,
+    project_id: undefined,
+  });
+  assert.equal(vertexProjectOf(rehydrated), "790050303616");
 });
 
 test("live vertex catalog keeps every publisher family", () => {

@@ -59,7 +59,7 @@ function inferThinking(id, display, family) {
   if (["imagen", "veo", "embedding", "palm", "codey"].includes(family)) return false;
   if (family === "claude") return true;
   if (/gemini-2\.0/.test(blob) && !blob.includes("thinking")) return false;
-  return family === "gemini" && /gemini-2\.5|gemini-3|thinking/.test(blob);
+  return family === "gemini" && /gemini-2\.5|gemini-3|gemini-4|thinking/.test(blob);
 }
 
 function inferImages(family, id, display) {
@@ -79,7 +79,7 @@ function inferEfforts(id, display, thinking, family) {
   if (!thinking) return [];
   const blob = `${id} ${display}`.toLowerCase();
   if (family === "claude") return ["none", "low", "medium", "high"];
-  if (/gemini-3/.test(blob)) return ["none", "minimal", "low", "medium", "high"];
+  if (/gemini-[34]/.test(blob)) return ["none", "minimal", "low", "medium", "high"];
   return ["none", "low", "medium", "high"];
 }
 
@@ -169,6 +169,7 @@ export function mergeVertexCatalog(staticModels = [], live = []) {
 // GET publishers/google/models rejects API keys. Generate still accepts any
 // vertex/<id> even if it is not in this list.
 export const EXPRESS_MODE_MODELS = [
+  { id: "gemini-4-argon", name: "Gemini 4 Argon", family: "gemini", thinking: true, images: true, imageOut: false, context: 1_048_576, output: 65_536 },
   { id: "gemini-3-pro-image", name: "Gemini 3 Pro Image", family: "gemini", thinking: true, images: true, imageOut: true, context: 1_048_576, output: 65_536 },
   { id: "gemini-3.1-flash-image", name: "Gemini 3.1 Flash Image", family: "gemini", thinking: true, images: true, imageOut: true, context: 1_048_576, output: 65_536 },
   { id: "gemini-3.1-pro-preview", name: "Gemini 3.1 Pro Preview", family: "gemini", thinking: true, images: true, imageOut: true, context: 1_048_576, output: 65_536 },

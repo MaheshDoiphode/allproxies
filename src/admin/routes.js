@@ -229,6 +229,7 @@ export function createAdmin({ settings, client, chatgpt = null, vertex = null })
         const bundle = await vertex.addAccount({
           apiKey: body.api_key || body.apiKey || body.key,
           location: body.location,
+          project: body.project || body.project_id || body.projectId,
           label: body.label || body.email,
         });
         sendJson(res, 200, { provider: "vertex", account: vertex.accountSummary(bundle) });

@@ -113,6 +113,8 @@ export function openaiContentToParts(content) {
   return parts;
 }
 
+const CONTINUE_AFTER_MODEL = "(continue)";
+
 export function normalizeContents(contents) {
   if (!contents.length) return [{ role: "user", parts: [{ text: "" }] }];
   if (contents[0].role === "model") contents.unshift({ role: "user", parts: [{ text: "" }] });
@@ -156,6 +158,13 @@ export function normalizeContents(contents) {
       next.parts.push(placeholder);
       currentResponses.push(placeholder);
     }
+  }
+
+  // Gemini generateContent requires the last turn to be user. Clients that
+  // interrupt a stream resend the partial assistant reply as the last message.
+  const last = contents[contents.length - 1];
+  if (last?.role === "model") {
+    contents.push({ role: "user", parts: [{ text: CONTINUE_AFTER_MODEL }] });
   }
 
   return contents;
@@ -345,7 +354,7 @@ export function wrapGenerate({ model, project, contents, system, generation, too
   const request = { contents: safeContents };
   if (system) request.systemInstruction = system;
   if (generation) request.generationConfig = generation;
-  if (tools) request.tools = sanitizeTools(tools);
+  if (tools) request.tools = sanitizeTools(tools, { jsonSchema: String(model).toLowerCase().includes("claude") });
   if (sessionId) request.sessionId = sessionId;
   return {
     project,
@@ -592,6 +601,10 @@ export class AnthropicStreamAccumulator {
     return Boolean(this.seenText || this.seenThoughts || this.seenCallIds.size);
   }
 
+  get hasVisibleContent() {
+    return Boolean(this.seenText.trim()) || this.seenCallIds.size > 0;
+  }
+
   start() {
     this.started = true;
     return [{
@@ -684,7 +697,9 @@ export class AnthropicStreamAccumulator {
     return events;
   }
 
-  finish() {
+  // `error` is set when the upstream stream died mid-way. It is reported as visible text on purpose:
+  // VS Code maps an Anthropic `error` event to "Sorry, no response was returned." and drops the message.
+  finish({ error } = {}) {
     const events = [];
     if (this.thinkIndex != null) {
       if (!this.thinkingSignatureSent) {
@@ -697,23 +712,28 @@ export class AnthropicStreamAccumulator {
       }
       events.push({ type: "content_block_stop", index: this.thinkIndex });
     }
-    // If the model produced no visible output (only thoughts, or nothing at all), emit a fallback
-    // text block so clients requiring content (like VS Code Copilot) don't report
-    // "Sorry, no response was returned."
-    if (this.textIndex == null && this.seenCallIds.size === 0) {
+    // Whitespace-only text counts as empty: clients treat it as "no response" too.
+    const visible = Boolean(this.seenText.trim()) || this.seenCallIds.size > 0;
+    let notice = "";
+    if (error) {
+      const detail = String(error?.message || error).slice(0, 300);
+      notice = visible
+        ? `\n\n[Response interrupted: ${detail}]`
+        : `The upstream request failed before the model answered: ${detail}. Please retry.`;
+    } else if (!visible) {
+      // Thoughts stand in for the answer only on a normal stop; an abnormal finish reason
+      // (MALFORMED_FUNCTION_CALL, SAFETY, ...) is reported instead so the failure is visible.
+      const abnormal = this.upstreamFinish && this.upstreamFinish !== "STOP";
+      notice = (!abnormal && this.seenThoughts.trim()) || emptyResponseNotice(this.upstreamFinish);
+    }
+    if (notice && this.textIndex != null) {
+      events.push({ type: "content_block_delta", index: this.textIndex, delta: { type: "text_delta", text: notice } });
+      events.push({ type: "content_block_stop", index: this.textIndex });
+    } else if (notice) {
       const idx = this.block;
       this.block += 1;
-      const fallbackText = this.seenThoughts.trim() || emptyResponseNotice(this.upstreamFinish);
-      events.push({
-        type: "content_block_start",
-        index: idx,
-        content_block: { type: "text", text: "" },
-      });
-      events.push({
-        type: "content_block_delta",
-        index: idx,
-        delta: { type: "text_delta", text: fallbackText },
-      });
+      events.push({ type: "content_block_start", index: idx, content_block: { type: "text", text: "" } });
+      events.push({ type: "content_block_delta", index: idx, delta: { type: "text_delta", text: notice } });
       events.push({ type: "content_block_stop", index: idx });
     } else if (this.textIndex != null) {
       events.push({ type: "content_block_stop", index: this.textIndex });

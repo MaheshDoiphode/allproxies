@@ -60,6 +60,22 @@ test("openai chat becomes Vertex generateContent with thinking + image config", 
   assert.deepEqual(body.generationConfig.responseModalities, ["TEXT", "IMAGE"]);
 });
 
+test("interrupted openai assistant reply is followed by a continue user turn", () => {
+  const wrapped = openaiToVertex(
+    {
+      model: "gemini-4-argon",
+      messages: [
+        { role: "user", content: "write a long poem" },
+        { role: "assistant", content: "In the quiet dusk the" },
+      ],
+    },
+    { model: "gemini-4-argon" },
+  );
+  const body = vertexHttpBody(wrapped);
+  assert.deepEqual(body.contents.map((item) => item.role), ["user", "model", "user"]);
+  assert.equal(body.contents[2].parts[0].text, "(continue)");
+});
+
 test("anthropic image blocks become Vertex inlineData", () => {
   const wrapped = anthropicToVertex(
     {
@@ -133,3 +149,24 @@ test("anthropic messages keep thinking budget when given", () => {
   assert.equal(wrapped.request.generationConfig.thinkingConfig.thinkingBudget, 2048);
   assert.equal(wrapped.request.generationConfig.maxOutputTokens, 128);
 });
+
+test("gemini-4-argon maps thinking and routing properly", () => {
+  assert.deepEqual(vertexThinkingFromRequest("gemini-4-argon", { reasoning_effort: "high" }, "high"), {
+    includeThoughts: true,
+    thinkingLevel: "HIGH",
+  });
+  const wrapped = anthropicToVertex(
+    {
+      model: "vertex/gemini-4-argon",
+      max_tokens: 64,
+      messages: [{ role: "user", content: "hello" }],
+    },
+    { model: "gemini-4-argon", effort: "low" },
+  );
+  assert.equal(wrapped.model, "gemini-4-argon");
+  assert.deepEqual(wrapped.request.generationConfig.thinkingConfig, {
+    includeThoughts: true,
+    thinkingLevel: "LOW",
+  });
+});
+

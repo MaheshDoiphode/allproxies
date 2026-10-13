@@ -16,7 +16,20 @@ export function vertexRegionalBase(location) {
   return `https://${loc}-aiplatform.googleapis.com`;
 }
 
-export function vertexModelResource(model, { publisher = VERTEX_PUBLISHER } = {}) {
+export function isVertexLocation(value) {
+  const loc = String(value || "").trim().toLowerCase();
+  if (!loc) return false;
+  if (loc === "global" || loc === "us" || loc === "eu") return true;
+  return /^[a-z]+(?:-[a-z]+)+\d+$/.test(loc);
+}
+
+export function isVertexProjectId(value) {
+  const raw = String(value || "").trim();
+  if (!raw || isVertexLocation(raw)) return false;
+  return true;
+}
+
+export function vertexPublisherPath(model, { publisher = VERTEX_PUBLISHER } = {}) {
   const raw = String(model || "").trim();
   if (!raw) return "";
   if (raw.startsWith("projects/") || raw.startsWith("publishers/") || raw.startsWith("models/")) return raw;
@@ -27,18 +40,60 @@ export function vertexModelResource(model, { publisher = VERTEX_PUBLISHER } = {}
   return `publishers/${publisher}/models/${raw}`;
 }
 
-export function vertexGeneratePath(model) {
-  return `${vertexModelResource(model)}:generateContent`;
+export function vertexModelResource(model, { publisher = VERTEX_PUBLISHER, project, location } = {}) {
+  const publisherPath = vertexPublisherPath(model, { publisher });
+  if (!publisherPath) return "";
+  if (publisherPath.startsWith("projects/") || publisherPath.startsWith("models/")) return publisherPath;
+  const proj = isVertexProjectId(project) ? String(project).trim() : "";
+  if (!proj) return publisherPath;
+  const loc = String(location || "global").trim() || "global";
+  return `projects/${proj}/locations/${loc}/${publisherPath}`;
 }
 
-export function vertexStreamPath(model) {
-  return `${vertexModelResource(model)}:streamGenerateContent?alt=sse`;
+export function withVertexProjectPath(url, { project, location = "global" } = {}) {
+  if (!isVertexProjectId(project)) return url;
+  try {
+    const parsed = new URL(url);
+    if (/\/projects\//.test(parsed.pathname)) return url;
+    parsed.pathname = parsed.pathname.replace(
+      /(\/v1(?:beta\d+)?)\/(publishers\/)/,
+      `$1/projects/${String(project).trim()}/locations/${String(location || "global").trim() || "global"}/$2`,
+    );
+    return parsed.toString();
+  } catch {
+    return url;
+  }
 }
 
-export function vertexModelsPath() {
-  return "publishers/google/models";
+export function parseVertexPublisherError(response) {
+  const payload = response?.parsed;
+  const message = String(
+    (payload && typeof payload === "object" && (payload.error?.message || payload.message)) ||
+      response?.body ||
+      response?.message ||
+      "",
+  );
+  const match = message.match(/projects\/([^/`\s]+)\/locations\/([^/`\s]+)\//);
+  if (!match) return null;
+  return { project: match[1], location: match[2], message };
 }
 
-export function vertexPredictPath(model) {
-  return `${vertexModelResource(model)}:predict`;
+export function vertexGeneratePath(model, opts) {
+  return `${vertexModelResource(model, opts)}:generateContent`;
+}
+
+export function vertexStreamPath(model, opts) {
+  return `${vertexModelResource(model, opts)}:streamGenerateContent?alt=sse`;
+}
+
+export function vertexModelsPath({ publisher = VERTEX_PUBLISHER, project, location } = {}) {
+  const publisherPath = `publishers/${publisher}/models`;
+  const proj = isVertexProjectId(project) ? String(project).trim() : "";
+  if (!proj) return publisherPath;
+  const loc = String(location || "global").trim() || "global";
+  return `projects/${proj}/locations/${loc}/${publisherPath}`;
+}
+
+export function vertexPredictPath(model, opts) {
+  return `${vertexModelResource(model, opts)}:predict`;
 }

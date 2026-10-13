@@ -27,6 +27,28 @@ test("schema strips unsupported and promotes const", () => {
   assert.deepEqual(cleaned.required, ["keep"]);
 });
 
+test("claude tools use parametersJsonSchema so anyOf survives the upstream conversion", () => {
+  const tool = {
+    name: "emulate",
+    description: "d",
+    input_schema: {
+      type: "object",
+      properties: { media: { anyOf: [{ type: "string", enum: ["screen", "print"] }, { type: "null" }] } },
+    },
+  };
+  const gemini = sanitizeTools([tool])[0].functionDeclarations[0];
+  assert.ok(gemini.parameters);
+  assert.equal(gemini.parametersJsonSchema, undefined);
+
+  const claude = sanitizeTools([tool], { jsonSchema: true })[0].functionDeclarations[0];
+  assert.equal(claude.parameters, undefined);
+  assert.equal(claude.parametersJsonSchema.type, "object");
+  assert.equal(claude.parametersJsonSchema.properties.media.anyOf.length, 2);
+
+  const empty = sanitizeTools([{ name: "noargs", input_schema: {} }], { jsonSchema: true })[0].functionDeclarations[0];
+  assert.deepEqual(empty.parametersJsonSchema, { type: "object", properties: {} });
+});
+
 test("tool name sanitized", () => {
   assert.equal(sanitizeToolName("pkg/read.file"), "pkg_read_file");
   assert.ok(sanitizeToolName("9bad").startsWith("t_"));

@@ -45,6 +45,7 @@ export function loadSettings(overrides = {}) {
     vertexTokenPath: resolvePath(overrides.vertexTokenPath ?? env.ALLPROXIES_VERTEX_TOKEN_PATH, path.join("data", "vertex-tokens.db")),
     vertexBaseUrl: (overrides.vertexBaseUrl ?? env.ALLPROXIES_VERTEX_BASE_URL ?? "").replace(/\/$/, ""),
     vertexLocation: overrides.vertexLocation ?? env.ALLPROXIES_VERTEX_LOCATION ?? "global",
+    vertexProject: overrides.vertexProject ?? env.ALLPROXIES_VERTEX_PROJECT ?? env.GOOGLE_CLOUD_PROJECT ?? "",
     vertexApiKey: overrides.vertexApiKey ?? env.ALLPROXIES_VERTEX_API_KEY ?? env.GOOGLE_API_KEY ?? "",
     modelsPath: resolvePath(overrides.modelsPath ?? env.ALLPROXIES_MODELS_PATH, path.join("data", "models.json")),
     antigravityEndpoint: (overrides.antigravityEndpoint ?? env.ALLPROXIES_ANTIGRAVITY_ENDPOINT ?? "daily").toLowerCase(),

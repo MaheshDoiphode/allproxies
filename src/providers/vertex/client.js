@@ -3,14 +3,17 @@ import {
   VERTEX_API_KEY_HEADER,
   VERTEX_API_VERSION,
   VERTEX_USER_AGENT,
+  parseVertexPublisherError,
   vertexGeneratePath,
   vertexModelsPath,
   vertexRegionalBase,
   vertexStreamPath,
+  withVertexProjectPath,
 } from "../../core/vertex-constants.js";
 import { AuthRequiredError, HttpError, UpstreamError } from "../../core/errors.js";
 import { iterateSse, request, requestJson } from "../../http/request.js";
 import { ResponseStore } from "../antigravity/responses-store.js";
+import { streamAnthropicMessages } from "../anthropic-stream.js";
 import { loadStaticVertexCatalog, mergeVertexCatalog, nextPageTokenOf, parseVertexModels, resolveVertexRoute } from "./catalog.js";
 import {
   TokenStore,
@@ -20,11 +23,13 @@ import {
   disableAccount,
   hydrateVertexBundle,
   isAccountDisabled,
+  isQuotaError,
   isRetryableUpstreamError,
   setAccountEnabled,
   touchAccountStats,
   vertexApiKeyOf,
   vertexLocationOf,
+  vertexProjectOf,
 } from "./tokens.js";
 import {
   AnthropicStreamAccumulator,
@@ -49,9 +54,6 @@ function formatSse(event, payload) {
   return `event: ${event}\ndata: ${JSON.stringify(payload)}\n\n`;
 }
 
-function sleep(ms) {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
 
 function catalogErrorMessage(err) {
   const msg = String(err?.message || err || "").trim();
@@ -61,45 +63,6 @@ function catalogErrorMessage(err) {
   return msg.slice(0, 400) || "Vertex model list failed";
 }
 
-function anthropicErrorEvent(err) {
-  return formatSse("error", {
-    type: "error",
-    error: {
-      type: err?.payload?.error?.type || err?.name || "api_error",
-      message: err?.message || "upstream stream failed",
-    },
-  });
-}
-
-async function* withIdlePings(source, idleMs = 10_000) {
-  const pending = [];
-  let done = false;
-  let fail;
-  let last = Date.now();
-  const pull = (async () => {
-    try {
-      for await (const event of source) pending.push(event);
-    } catch (err) {
-      fail = err;
-    } finally {
-      done = true;
-    }
-  })();
-  while (!done || pending.length) {
-    if (pending.length) {
-      last = Date.now();
-      yield pending.shift();
-      continue;
-    }
-    if (Date.now() - last >= idleMs) {
-      last = Date.now();
-      yield { __ping: true };
-    }
-    await sleep(200);
-  }
-  await pull;
-  if (fail) throw fail;
-}
 
 export class VertexClient {
   constructor(settings, { store } = {}) {
@@ -145,6 +108,10 @@ export class VertexClient {
     return this.settings.vertexLocation || "global";
   }
 
+  get defaultProject() {
+    return String(this.settings.vertexProject || "").trim();
+  }
+
   get defaultBaseUrl() {
     return String(this.settings.vertexBaseUrl || vertexRegionalBase(this.defaultLocation)).replace(/\/$/, "");
   }
@@ -180,7 +147,7 @@ export class VertexClient {
     return {
       id: accountIdOf(hydrated),
       email: hydrated.email || null,
-      project: vertexLocationOf(hydrated),
+      project: vertexProjectOf(hydrated) || this.defaultProject || null,
       provider: "vertex",
       plan: "express",
       expired: false,
@@ -202,6 +169,7 @@ export class VertexClient {
       quotas: hydrated.quotas || [],
       quotas_at: hydrated.quotas_at || 0,
       location: vertexLocationOf(hydrated),
+      project_id: vertexProjectOf(hydrated) || this.defaultProject || null,
     };
   }
 
@@ -243,12 +211,13 @@ export class VertexClient {
     };
   }
 
-  addAccount({ apiKey, location, label } = {}) {
+  addAccount({ apiKey, location, project, projectId, label } = {}) {
     const key = String(apiKey || "").trim();
     if (!key) throw new HttpError(400, "Vertex API key is required", { type: "invalid_request_error" });
     const bundle = createVertexBundle({
       api_key: key,
       location: location || this.defaultLocation,
+      project_id: project || projectId || this.defaultProject,
       label,
       enabled: true,
       expires_at: 4_000_000_000,
@@ -263,9 +232,9 @@ export class VertexClient {
     return this.addAccount(body);
   }
 
-  async login({ apiKey, location, label } = {}) {
+  async login({ apiKey, location, project, projectId, label } = {}) {
     if (!apiKey) throw new AuthRequiredError("Vertex Express Mode needs an API key. Paste it in the dashboard or: node src/cli.js login-vertex --key AQ....");
-    return this.addAccount({ apiKey, location, label });
+    return this.addAccount({ apiKey, location, project, projectId, label });
   }
 
   async switchAccount(id) {
@@ -307,6 +276,14 @@ export class VertexClient {
   }
 
   markFailed(bundle, err) {
+    // A network blip or 5xx on the only usable key must not lock it out: with nobody to fail over to,
+    // the cooldown would turn one transient error into 30s of "all keys are rate-limited".
+    const status = Number(err?.status || 0);
+    const transient = !isQuotaError(err) && status !== 401 && status !== 403 && err?.name !== "OAuthError" && err?.name !== "ProjectError";
+    const hasOther = this.accounts().some(
+      (item) => vertexApiKeyOf(item) && !isAccountDisabled(item) && accountIdOf(item) !== accountIdOf(bundle),
+    );
+    if (transient && !hasOther) return null;
     const reason = String(err?.code || err?.message || "upstream").slice(0, 180);
     const disabled = disableAccount(bundle, { until: cooldownUntil(err), reason });
     this.store.save(createVertexBundle(disabled), { activate: false });
@@ -342,6 +319,7 @@ export class VertexClient {
   async post(url, payload, { stream = false } = {}) {
     const tried = new Set();
     let lastError;
+    let recoveredOnce = false;
     for (let attempt = 0; attempt < 8; attempt += 1) {
       let bundle;
       try {
@@ -379,6 +357,15 @@ export class VertexClient {
       } catch (err) {
         lastError = err;
         this.recordUsage(bundle, { ok: false });
+        if (!recoveredOnce) {
+          const recovered = this.recoverPublisherMiss(bundle, err, url);
+          if (recovered) {
+            recoveredOnce = true;
+            tried.delete(id);
+            url = recovered.url;
+            continue;
+          }
+        }
         if (isRetryableUpstreamError(err) && this.markFailed(bundle, err)) continue;
         throw err;
       }
@@ -387,16 +374,41 @@ export class VertexClient {
   }
 
   rewriteUrl(url, bundle) {
-    if (this.settings.vertexBaseUrl) return url;
+    const scoped = withVertexProjectPath(url, this.routeOpts(bundle));
+    if (this.settings.vertexBaseUrl) return scoped;
     try {
-      const parsed = new URL(url);
+      const parsed = new URL(scoped);
       const next = new URL(this.baseUrlFor(bundle));
       parsed.protocol = next.protocol;
       parsed.host = next.host;
       return parsed.toString();
     } catch {
-      return url;
+      return scoped;
     }
+  }
+
+  routeOpts(bundle) {
+    const hydrated = hydrateVertexBundle(bundle || this.activeAccount());
+    return {
+      project: vertexProjectOf(hydrated) || this.defaultProject,
+      location: vertexLocationOf(hydrated) || this.defaultLocation,
+    };
+  }
+
+  rememberProject(bundle, project) {
+    const current = hydrateVertexBundle(bundle || this.activeAccount());
+    if (!current || !project || vertexProjectOf(current) === String(project)) return current;
+    const next = createVertexBundle({ ...current, project_id: project });
+    this.store.save(next, { activate: false });
+    return this.findAccount(accountIdOf(next)) || next;
+  }
+
+  recoverPublisherMiss(bundle, err, url) {
+    const parsed = parseVertexPublisherError({ parsed: { error: { message: err?.message } }, body: err?.message });
+    if (!parsed?.project) return null;
+    if (vertexProjectOf(bundle) === parsed.project) return null;
+    const next = this.rememberProject(bundle, parsed.project);
+    return { bundle: next, url: this.rewriteUrl(url, next) };
   }
 
   send(url, payload, bundle, { stream = false } = {}) {
@@ -428,7 +440,7 @@ export class VertexClient {
   }
 
   modelsListUrl(bundle, pageToken = "") {
-    const url = new URL(this.versioned(this.baseUrlFor(bundle), vertexModelsPath()));
+    const url = new URL(this.versioned(this.baseUrlFor(bundle), vertexModelsPath(this.routeOpts(bundle))));
     url.searchParams.set("pageSize", "200");
     if (pageToken) url.searchParams.set("pageToken", pageToken);
     return url.toString();
@@ -502,11 +514,13 @@ export class VertexClient {
   }
 
   generateUrl(model, bundle) {
-    return this.versioned(this.baseUrlFor(bundle || this.activeAccount()), vertexGeneratePath(model));
+    const active = bundle || this.activeAccount();
+    return this.versioned(this.baseUrlFor(active), vertexGeneratePath(model, this.routeOpts(active)));
   }
 
   streamUrl(model, bundle) {
-    return this.versioned(this.baseUrlFor(bundle || this.activeAccount()), vertexStreamPath(model));
+    const active = bundle || this.activeAccount();
+    return this.versioned(this.baseUrlFor(active), vertexStreamPath(model, this.routeOpts(active)));
   }
 
   async generate(wrapped) {
@@ -561,55 +575,11 @@ export class VertexClient {
     const resolved = await this.resolveRequestModel(body);
     const bundle = this.requireBundle();
     const wrapped = anthropicToVertex(body, resolved);
-    // Gemini sometimes ends a turn with no parts at all (MALFORMED_FUNCTION_CALL, empty STOP).
-    // Nothing is sent to the client until the first real content arrives, so those turns can be
-    // retried transparently instead of surfacing as "Sorry, no response was returned."
-    const maxAttempts = 3;
-    let acc;
-    let opened = false;
-    for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
-      acc = new AnthropicStreamAccumulator(resolved.model);
-      const held = [];
-      opened = false;
-      try {
-        for await (const event of withIdlePings(this.stream(wrapped))) {
-          if (event?.__ping) {
-            if (opened) yield formatSse("ping", { type: "ping" });
-            continue;
-          }
-          for (const item of acc.ingest(event)) {
-            if (opened) {
-              yield formatSse(item.type, item);
-            } else {
-              held.push(item);
-            }
-          }
-          if (!opened && acc.hasContent) {
-            opened = true;
-            for (const item of held.splice(0)) yield formatSse(item.type, item);
-          }
-        }
-      } catch (err) {
-        if (!opened) throw err;
-        yield anthropicErrorEvent(err);
-        for (const item of acc.finish()) yield formatSse(item.type, item);
-        return;
-      }
-      if (opened || attempt === maxAttempts) {
-        if (!opened) {
-          for (const item of held) yield formatSse(item.type, item);
-          opened = held.length > 0;
-        }
-        break;
-      }
-    }
-    if (!opened) {
-      for (const event of acc.start()) {
-        if (event.message) event.message.usage = { ...acc.usage };
-        yield formatSse(event.type, event);
-      }
-    }
-    for (const item of acc.finish()) yield formatSse(item.type, item);
+    const acc = yield* streamAnthropicMessages({
+      open: () => this.stream(wrapped),
+      makeAccumulator: () => new AnthropicStreamAccumulator(resolved.model),
+      log: (msg) => console.warn(`[vertex] ${resolved.model}: ${msg}`),
+    });
     this.recordUsage(this.store.load() || bundle, { ok: true, prompt: acc.usage?.input_tokens, completion: acc.usage?.output_tokens });
   }
 

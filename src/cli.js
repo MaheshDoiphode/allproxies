@@ -15,7 +15,7 @@ function usage() {
 Commands:
   login                      Sign in with Google Antigravity. Adds another account.
   login-chatgpt              Sign in with ChatGPT / Codex. Adds another account.
-  login-vertex --key KEY [--location global] [--label NAME]
+  login-vertex --key KEY [--location global] [--project ID] [--label NAME]
                              Save a Vertex Express Mode API key
   logout [email]             Remove one Antigravity account, or all if omitted
   logout-chatgpt [email]     Remove one ChatGPT account, or all if omitted
@@ -48,7 +48,12 @@ async function main(argv = process.argv.slice(2)) {
   const chatgpt = new ChatgptClient(settings);
   const vertex = new VertexClient(settings);
   if (settings.vertexApiKey && !vertex.accounts().length) {
-    vertex.addAccount({ apiKey: settings.vertexApiKey, location: settings.vertexLocation, label: "env" });
+    vertex.addAccount({
+      apiKey: settings.vertexApiKey,
+      location: settings.vertexLocation,
+      project: settings.vertexProject,
+      label: "env",
+    });
   }
 
   if (command === "login") {
@@ -118,6 +123,7 @@ async function main(argv = process.argv.slice(2)) {
     for (let i = 0; i < rest.length; i += 1) {
       if (rest[i] === "--key" || rest[i] === "--api-key") opts.apiKey = rest[++i];
       else if (rest[i] === "--location") opts.location = rest[++i];
+      else if (rest[i] === "--project" || rest[i] === "--project-id") opts.project = rest[++i];
       else if (rest[i] === "--label") opts.label = rest[++i];
       else if (!opts.apiKey && !String(rest[i]).startsWith("--")) opts.apiKey = rest[i];
     }
@@ -125,6 +131,7 @@ async function main(argv = process.argv.slice(2)) {
       const bundle = await vertex.login(opts);
       console.log(`Saved Vertex key as ${bundle.email || "vertex"}`);
       console.log(`Location: ${bundle.location || "global"}`);
+      if (bundle.project_id) console.log(`Project: ${bundle.project_id}`);
       console.log(`Accounts saved: ${vertex.accounts().length}`);
       console.log(`Tokens saved to ${vertex.store.path}`);
       return 0;
@@ -266,7 +273,8 @@ async function main(argv = process.argv.slice(2)) {
         const bits = [
           `${mark} ${summary.email || summary.id}`,
           `location=${summary.location || "?"}`,
-        ];
+          summary.project_id ? `project=${summary.project_id}` : null,
+        ].filter(Boolean);
         if (summary.enabled === false) bits.push("disabled");
         if (summary.limited) bits.push(`limited_until=${new Date(summary.disabled_until).toISOString()}`);
         console.log(bits.join("  "));

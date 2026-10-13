@@ -99,16 +99,22 @@ export function sanitizeSchema(node) {
   return cleaned;
 }
 
-function cleanDeclaration(decl) {
+// `jsonSchema` selects the wire field. Gemini takes Google's Schema subset in `parameters`. Claude (served
+// through the same endpoint) rejects Gemini-style `parameters` containing anyOf with
+// "input_schema: JSON schema is invalid ... draft 2020-12", but accepts a plain JSON Schema in
+// `parametersJsonSchema`.
+function cleanDeclaration(decl, { jsonSchema = false } = {}) {
   const parameters = decl.parameters || decl.parametersJsonSchema || decl.input_schema || {};
-  return {
+  const cleaned = parameters && typeof parameters === "object" ? sanitizeSchema(parameters) : { type: "object", properties: {} };
+  const base = {
     name: sanitizeToolName(String(decl.name || "tool")),
     description: String(decl.description || ""),
-    parameters: parameters && typeof parameters === "object" ? sanitizeSchema(parameters) : { type: "object", properties: {} },
   };
+  if (!jsonSchema) return { ...base, parameters: cleaned };
+  return { ...base, parametersJsonSchema: { type: "object", ...(Object.keys(cleaned).length ? cleaned : { properties: {} }) } };
 }
 
-export function sanitizeTools(tools) {
+export function sanitizeTools(tools, options = {}) {
   const declarations = [];
   let googleSearch = false;
   for (const tool of tools || []) {
@@ -117,20 +123,23 @@ export function sanitizeTools(tools) {
       continue;
     }
     if (tool.functionDeclarations || tool.function_declarations) {
-      for (const decl of tool.functionDeclarations || tool.function_declarations || []) declarations.push(cleanDeclaration(decl));
+      for (const decl of tool.functionDeclarations || tool.function_declarations || []) declarations.push(cleanDeclaration(decl, options));
       continue;
     }
     if (tool.type === "function" && tool.function && typeof tool.function === "object") {
       declarations.push(
-        cleanDeclaration({
-          name: tool.function.name,
-          description: tool.function.description,
-          parameters: tool.function.parameters || tool.function.parametersJsonSchema,
-        }),
+        cleanDeclaration(
+          {
+            name: tool.function.name,
+            description: tool.function.description,
+            parameters: tool.function.parameters || tool.function.parametersJsonSchema,
+          },
+          options,
+        ),
       );
       continue;
     }
-    if (tool.name) declarations.push(cleanDeclaration(tool));
+    if (tool.name) declarations.push(cleanDeclaration(tool, options));
   }
   if (googleSearch && !declarations.length) return [{ googleSearch: {} }];
   if (declarations.length) return [{ functionDeclarations: declarations }];

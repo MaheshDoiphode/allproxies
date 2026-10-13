@@ -86,6 +86,43 @@ test("assistant maps to model and tool result to function response", () => {
   assert.equal(payload.request.contents[2].parts[0].functionResponse.name, "lookup");
 });
 
+test("interrupted assistant reply is followed by a continue user turn", () => {
+  const payload = openaiToUpstream(
+    {
+      messages: [
+        { role: "user", content: "write a long poem" },
+        { role: "assistant", content: "In the quiet dusk the" },
+      ],
+    },
+    { model: "m", project: "p" },
+  );
+  assert.deepEqual(
+    payload.request.contents.map((item) => item.role),
+    ["user", "model", "user"],
+  );
+  assert.equal(payload.request.contents[1].parts[0].text, "In the quiet dusk the");
+  assert.equal(payload.request.contents[2].parts[0].text, "(continue)");
+});
+
+test("anthropic interrupted assistant reply is followed by a continue user turn", () => {
+  const payload = anthropicToUpstream(
+    {
+      model: "m",
+      max_tokens: 16,
+      messages: [
+        { role: "user", content: "write a long poem" },
+        { role: "assistant", content: "In the quiet dusk the" },
+      ],
+    },
+    { model: "m", project: "p" },
+  );
+  assert.deepEqual(
+    payload.request.contents.map((item) => item.role),
+    ["user", "model", "user"],
+  );
+  assert.equal(payload.request.contents[2].parts[0].text, "(continue)");
+});
+
 test("anthropic tool_result becomes a user functionResponse", () => {
   const payload = anthropicToUpstream(
     {
@@ -232,6 +269,20 @@ test("anthropic stream signs thinking blocks before stop", () => {
   const done = acc.finish();
   assert.ok(done.some((item) => item.delta?.type === "signature_delta" && item.delta.signature === "skip_thought_signature_validator"));
   assert.ok(done.some((item) => item.type === "content_block_stop" && item.index === 0));
+});
+
+test("claude requests send tool schemas as parametersJsonSchema, gemini keeps parameters", () => {
+  const body = {
+    max_tokens: 100,
+    messages: [{ role: "user", content: "hi" }],
+    tools: [{ name: "t", description: "d", input_schema: { type: "object", properties: { a: { anyOf: [{ type: "string" }, { type: "null" }] } } } }],
+  };
+  const claude = anthropicToUpstream(body, { model: "claude-sonnet-4-6", project: "p" });
+  const claudeDecl = claude.request.tools[0].functionDeclarations[0];
+  assert.ok(claudeDecl.parametersJsonSchema && !claudeDecl.parameters);
+  const gemini = anthropicToUpstream(body, { model: "gemini-3.8-flash", project: "p" });
+  const geminiDecl = gemini.request.tools[0].functionDeclarations[0];
+  assert.ok(geminiDecl.parameters && !geminiDecl.parametersJsonSchema);
 });
 
 test("tool result images stay in the same user turn as the functionResponse", () => {

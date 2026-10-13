@@ -31,6 +31,7 @@ import {
   disableAccount,
   isAccountDisabled,
   isExpired,
+  isQuotaError,
   isRetryableUpstreamError,
   projectOf,
   setAccountEnabled,
@@ -38,6 +39,7 @@ import {
 } from "./tokens.js";
 import { mergeQuotaViews, parseQuotaSummary, quotasFromLiveModels } from "./quota.js";
 import { ResponseStore } from "./responses-store.js";
+import { streamAnthropicMessages } from "../anthropic-stream.js";
 import {
   StreamAccumulator,
   ResponsesStreamAccumulator,
@@ -60,49 +62,6 @@ function formatSse(event, payload) {
   return `event: ${event}\ndata: ${JSON.stringify(payload)}\n\n`;
 }
 
-function sleep(ms) {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
-function anthropicErrorEvent(err) {
-  return formatSse("error", {
-    type: "error",
-    error: {
-      type: err?.payload?.error?.type || err?.name || "api_error",
-      message: err?.message || "upstream stream failed",
-    },
-  });
-}
-
-async function* withIdlePings(source, idleMs = 10_000) {
-  const pending = [];
-  let done = false;
-  let fail;
-  let last = Date.now();
-  const pull = (async () => {
-    try {
-      for await (const event of source) pending.push(event);
-    } catch (err) {
-      fail = err;
-    } finally {
-      done = true;
-    }
-  })();
-  while (!done || pending.length) {
-    if (pending.length) {
-      last = Date.now();
-      yield pending.shift();
-      continue;
-    }
-    if (Date.now() - last >= idleMs) {
-      last = Date.now();
-      yield { __ping: true };
-    }
-    await sleep(200);
-  }
-  await pull;
-  if (fail) throw fail;
-}
 
 export class AntigravityClient {
   constructor(settings, { store } = {}) {
@@ -372,6 +331,14 @@ export class AntigravityClient {
   }
 
   markFailed(bundle, err) {
+    // A network blip or 5xx on the only usable account must not lock it out: with nobody to fail over
+    // to, the cooldown would turn one transient error into 30s of "no usable account".
+    const status = Number(err?.status || 0);
+    const transient = !isQuotaError(err) && status !== 401 && status !== 403 && err?.name !== "OAuthError" && err?.name !== "ProjectError";
+    const hasOther = this.store
+      .list()
+      .some((item) => item.refresh_token && !isAccountDisabled(item) && accountIdOf(item) !== accountIdOf(bundle));
+    if (transient && !hasOther) return null;
     const reason = String(err?.code || err?.message || "upstream").slice(0, 180);
     const disabled = disableAccount(bundle, {
       until: cooldownUntil(err),
@@ -747,34 +714,12 @@ export class AntigravityClient {
 
   async *messagesStream(body) {
     const resolved = await this.resolveRequestModel(body);
-    const acc = new AnthropicStreamAccumulator(resolved.model);
     const bundle = await this.readyBundle();
-    let opened = false;
-    try {
-      for await (const event of withIdlePings(this.stream(anthropicToUpstream(body, resolved)))) {
-        if (event?.__ping) {
-          if (opened) yield formatSse("ping", { type: "ping" });
-          continue;
-        }
-        for (const item of acc.ingest(event)) {
-          opened = true;
-          yield formatSse(item.type, item);
-        }
-      }
-    } catch (err) {
-      if (this.settings.debugRequests) console.log(`[up] stream failed ${resolved.model}: ${err.message}`);
-      if (!opened) throw err;
-      yield anthropicErrorEvent(err);
-      for (const item of acc.finish()) yield formatSse(item.type, item);
-      return;
-    }
-    if (!opened) {
-      for (const event of acc.start()) {
-        if (event.message) event.message.usage = { ...acc.usage };
-        yield formatSse(event.type, event);
-      }
-    }
-    for (const item of acc.finish()) yield formatSse(item.type, item);
+    const acc = yield* streamAnthropicMessages({
+      open: () => this.stream(anthropicToUpstream(body, resolved)),
+      makeAccumulator: () => new AnthropicStreamAccumulator(resolved.model),
+      log: (msg) => console.warn(`[antigravity] ${resolved.model}: ${msg}`),
+    });
     this.recordUsage(this.store.load() || bundle, { ok: true, prompt: acc.usage?.input_tokens, completion: acc.usage?.output_tokens });
   }
 
