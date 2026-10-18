@@ -263,3 +263,37 @@ test("vertex retries express 404 on the project-scoped path from the error", asy
     await up.close();
   }
 });
+
+test("vertex does not overwrite a stored console project from a 404 rewrite", async () => {
+  const dir = tempDir();
+  const seen = [];
+  const up = await mockServer(({ url, res }) => {
+    seen.push(url.pathname);
+    sendJson(res, 404, {
+      error: {
+        code: 404,
+        status: "NOT_FOUND",
+        message: "Publisher model `projects/790050303616/locations/asia-southeast1/publishers/google/models/gemini-4-argon` was not found",
+      },
+    });
+  });
+  const tokenPath = writeVertex(dir, { project_id: "project-ad5beb0a-c96e-4620-952" });
+  const vertex = new VertexClient(testSettings(dir, {
+    vertexTokenPath: tokenPath,
+    vertexBaseUrl: up.url,
+    liveModels: false,
+  }));
+  try {
+    await assert.rejects(
+      () => vertex.chatCompletions({
+        model: "vertex/gemini-4-argon",
+        messages: [{ role: "user", content: "hi" }],
+      }),
+      /was not found/,
+    );
+    assert.equal(vertexProjectOf(vertex.activeAccount()), "project-ad5beb0a-c96e-4620-952");
+    assert.ok(seen.every((path) => path.includes("/projects/project-ad5beb0a-c96e-4620-952/")));
+  } finally {
+    await up.close();
+  }
+});

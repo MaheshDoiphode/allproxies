@@ -89,6 +89,17 @@ test("live vertex catalog keeps every publisher family", () => {
   const fallback = loadStaticVertexCatalog();
   assert.ok(fallback.some((item) => item.id === "vertex/gemini-3.8-flash"));
   assert.ok(fallback.some((item) => item.id === "vertex/gemini-2.5-flash"));
+  const deepseek = fallback.find((item) => item.id === "vertex/deepseek-ai/deepseek-v4.1-flash-maas");
+  assert.equal(deepseek?.family, "deepseek");
+  assert.equal(deepseek?.preferred, "deepseek-ai/deepseek-v4.1-flash-maas");
+  assert.equal(deepseek?.supports_thinking, true);
+  assert.equal(deepseek?.supports_images, true);
+  assert.equal(deepseek?.supports_image_output, false);
+  assert.deepEqual(deepseek?.efforts, ["none", "low", "medium", "high"]);
+  assert.equal(deepseek?.context, 1_048_576);
+  assert.equal(deepseek?.output, 1_048_576);
+  assert.equal(resolveVertexRoute({ model: "vertex/deepseek-v4.1-flash-maas" }, fallback).model, "deepseek-ai/deepseek-v4.1-flash-maas");
+  assert.equal(resolveVertexRoute({ model: "vertex/deepseek-ai/deepseek-v4.1-flash-maas" }, fallback).model, "deepseek-ai/deepseek-v4.1-flash-maas");
   const route = resolveVertexRoute({ model: "vertex/gemini-3.8-flash", reasoning_effort: "low" }, parsed);
   assert.equal(route.model, "gemini-3.8-flash");
   assert.equal(route.effort, "low");

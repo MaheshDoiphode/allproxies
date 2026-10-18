@@ -72,8 +72,6 @@ export class VertexClient {
     this.modelsCache = { at: 0, models: loadStaticVertexCatalog() };
     this.modelsTtlMs = 60_000;
     this.catalog = { at: 0, error: null, listed: this.modelsCache.models.length, source: "express" };
-    this.quotaCache = new Map();
-    this.quotaTtlMs = 30_000;
     this.stats = { requests: 0, success: 0, failed: 0, prompt_tokens: 0, completion_tokens: 0 };
   }
 
@@ -406,7 +404,7 @@ export class VertexClient {
   recoverPublisherMiss(bundle, err, url) {
     const parsed = parseVertexPublisherError({ parsed: { error: { message: err?.message } }, body: err?.message });
     if (!parsed?.project) return null;
-    if (vertexProjectOf(bundle) === parsed.project) return null;
+    if (vertexProjectOf(bundle)) return null;
     const next = this.rememberProject(bundle, parsed.project);
     return { bundle: next, url: this.rewriteUrl(url, next) };
   }
@@ -482,10 +480,7 @@ export class VertexClient {
   }
 
   async fetchQuotasFor(bundle) {
-    const id = accountIdOf(bundle);
-    const quotas = bundle.quotas || [];
-    this.quotaCache.set(id, { at: Date.now(), quotas });
-    return quotas;
+    return bundle?.quotas || [];
   }
 
   async refreshAccountQuotas(id) {
@@ -499,7 +494,7 @@ export class VertexClient {
     return this.accountSummary(this.findAccount(id) || match);
   }
 
-  async listAccountViews() {
+  async listAccountViews({ refresh: _refresh = false } = {}) {
     return this.accounts().map((bundle) => this.accountSummary(bundle));
   }
 

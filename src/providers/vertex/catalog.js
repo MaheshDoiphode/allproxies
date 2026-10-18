@@ -50,6 +50,7 @@ export function familyOf(id, display, item) {
   if (blob.includes("bison") || blob.includes("text-unicorn") || blob.includes("chat-bison")) return "palm";
   if (blob.includes("codey") || blob.includes("code-gecko") || blob.includes("codechat")) return "codey";
   if (blob.includes("gemini")) return "gemini";
+  if (blob.includes("deepseek")) return "deepseek";
   if (publisherOf(item?.name || "") !== "google") return publisherOf(item.name);
   return "other";
 }
@@ -57,7 +58,7 @@ export function familyOf(id, display, item) {
 function inferThinking(id, display, family) {
   const blob = `${id} ${display}`.toLowerCase();
   if (["imagen", "veo", "embedding", "palm", "codey"].includes(family)) return false;
-  if (family === "claude") return true;
+  if (family === "claude" || family === "deepseek") return true;
   if (/gemini-2\.0/.test(blob) && !blob.includes("thinking")) return false;
   return family === "gemini" && /gemini-2\.5|gemini-3|gemini-4|thinking/.test(blob);
 }
@@ -78,7 +79,7 @@ function inferImageOutput(family, id, display) {
 function inferEfforts(id, display, thinking, family) {
   if (!thinking) return [];
   const blob = `${id} ${display}`.toLowerCase();
-  if (family === "claude") return ["none", "low", "medium", "high"];
+  if (family === "claude" || family === "deepseek") return ["none", "low", "medium", "high"];
   if (/gemini-[34]/.test(blob)) return ["none", "minimal", "low", "medium", "high"];
   return ["none", "low", "medium", "high"];
 }
@@ -141,7 +142,7 @@ export function parseVertexModels(payload) {
         supports_image_output: inferImageOutput(family, id, display),
         efforts: inferEfforts(id, display, thinking, family),
         source: "live",
-        preferred: id,
+        preferred: publisherOf(full) !== "google" ? `${publisherOf(full)}/${id}` : id,
         publisher: publisherOf(full),
         methods: [...methods],
       });
@@ -165,9 +166,9 @@ export function mergeVertexCatalog(staticModels = [], live = []) {
   });
 }
 
-// Official Express Mode table (docs last updated 2026-10-10). Used only when
-// GET publishers/google/models rejects API keys. Generate still accepts any
-// vertex/<id> even if it is not in this list.
+// Official Express Mode table (docs last updated 2026-10-10), plus MaaS
+// models verified on saved Express keys. Used when GET publishers/*/models
+// rejects API keys. Generate still accepts any vertex/<id>.
 export const EXPRESS_MODE_MODELS = [
   { id: "gemini-4-argon", name: "Gemini 4 Argon", family: "gemini", thinking: true, images: true, imageOut: false, context: 1_048_576, output: 65_536 },
   { id: "gemini-3-pro-image", name: "Gemini 3 Pro Image", family: "gemini", thinking: true, images: true, imageOut: true, context: 1_048_576, output: 65_536 },
@@ -179,6 +180,22 @@ export const EXPRESS_MODE_MODELS = [
   { id: "gemini-2.5-flash-image", name: "Gemini 2.5 Flash Image", family: "gemini", thinking: true, images: true, imageOut: true, context: 1_048_576, output: 65_536 },
   { id: "gemini-2.5-flash", name: "Gemini 2.5 Flash", family: "gemini", thinking: true, images: true, imageOut: false, context: 1_048_576, output: 65_536 },
   { id: "gemini-2.5-flash-lite", name: "Gemini 2.5 Flash Lite", family: "gemini", thinking: false, images: true, imageOut: false, context: 1_048_576, output: 65_536 },
+  {
+    id: "deepseek-ai/deepseek-v4.1-flash-maas",
+    name: "DeepSeek V4.1 Flash",
+    family: "deepseek",
+    thinking: true,
+    images: true,
+    imageOut: false,
+    context: 1_048_576,
+    output: 1_048_576,
+    preferred: "deepseek-ai/deepseek-v4.1-flash-maas",
+    aliases: [
+      "deepseek-v4.1-flash-maas",
+      "deepseek-ai/deepseek-v4.1-flash-maas",
+      "publishers/deepseek-ai/models/deepseek-v4.1-flash-maas",
+    ],
+  },
 ];
 
 export function loadStaticVertexCatalog() {
@@ -195,21 +212,30 @@ export function loadStaticVertexCatalog() {
       supports_image_output: Boolean(item.imageOut),
       efforts: inferEfforts(item.id, item.name, thinking, item.family || familyOf(item.id, item.name, item)),
       source: "express",
-      preferred: item.id,
+      preferred: item.preferred || item.id,
+      aliases: item.aliases || [],
     }, { source: "express" });
   });
+}
+
+function catalogMatch(models, requested) {
+  const wanted = String(requested || "").trim();
+  if (!wanted) return null;
+  return (
+    models.find((item) => item.id === wanted || item.id === `vertex/${wanted}` || item.preferred === wanted || item.aliases?.includes(wanted)) ||
+    null
+  );
 }
 
 export function resolveVertexRoute(body, catalog) {
   const requested = stripModelPrefix(body?.model);
   const { baseId, effort: suffixEffort } = splitEffortSuffix(requested);
   const models = catalog || [];
-  const match =
-    models.find((item) => item.id === requested || item.aliases?.includes(requested) || item.id === `vertex/${requested}`) ||
-    models.find((item) => item.id === baseId || item.id === `vertex/${baseId}` || item.aliases?.includes(baseId) || item.preferred === baseId);
-  const effort = extractEffortFromBody(body) ?? suffixEffort ?? null;
+  const exact = catalogMatch(models, requested);
+  const match = exact || catalogMatch(models, baseId);
+  const effort = extractEffortFromBody(body) ?? (exact ? null : suffixEffort);
   return {
-    model: match?.preferred || match?.id?.replace?.(/^vertex[:/]/i, "") || baseId || requested,
+    model: match?.preferred || match?.id?.replace?.(/^vertex[:/]/i, "") || (exact ? requested : baseId) || requested,
     effort,
     requested,
     group: match

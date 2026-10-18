@@ -5,6 +5,7 @@
   const CLAUDE_KEY = "ap_claude_picks";
   const CLAUDE_1M_KEY = "ap_claude_1m";
   const CODEX_KEY = "ap_codex_model";
+  const FILTER_KEY = "ap_account_filters";
   const selected = new Set();
   let accounts = [];
   let models = [];
@@ -75,7 +76,9 @@
   }
 
   function renderQuotas(list) {
-    if (!list || !list.length) return '<div class="muted">No quota windows yet. Refresh after the account is used.</div>';
+    if (!list || !list.length) {
+      return `<div class="muted">No quota windows yet. Refresh after the account is used.</div>`;
+    }
     return '<div class="quotas">' + list.map((q) => {
       const used = pct(q.used, q.remaining);
       const klass = used > 90 ? "critical" : used > 70 ? "high" : "";
@@ -163,7 +166,7 @@
     const groups = [
       { id: "antigravity", title: "Antigravity", hint: "Cloud Code / Copilot Gemini via Google login" },
       { id: "chatgpt", title: "ChatGPT / Codex", hint: "gpt-* and o-series from a ChatGPT login" },
-      { id: "vertex", title: "Vertex AI", hint: "Express Mode API key (AQ.)" },
+      { id: "vertex", title: "Vertex AI", hint: "Express Mode API key (AQ.). Project id is needed for Gemini 4 models." },
     ];
     const leftover = rows.filter((a) => !groups.some((g) => g.id === accountProvider(a)));
     if (!accounts.length) {
@@ -183,6 +186,26 @@
       </section>`;
     }).join("");
     $("batchBar")?.classList.toggle("hidden", selected.size === 0);
+  }
+
+  function persistFilters() {
+    localStorage.setItem(FILTER_KEY, JSON.stringify({
+      search: $("filterSearch")?.value || "",
+      provider: $("filterProvider")?.value || "all",
+      status: $("filterStatus")?.value || "all",
+    }));
+  }
+
+  function restoreFilters() {
+    let saved = {};
+    try {
+      saved = JSON.parse(localStorage.getItem(FILTER_KEY) || "{}") || {};
+    } catch {
+      saved = {};
+    }
+    if ($("filterSearch") && saved.search != null) $("filterSearch").value = saved.search;
+    if ($("filterProvider") && saved.provider) $("filterProvider").value = saved.provider;
+    if ($("filterStatus") && saved.status) $("filterStatus").value = saved.status;
   }
 
   function renderStats(status) {
@@ -557,6 +580,7 @@
     $("loginPage").classList.add("hidden");
     $("mainPage").classList.remove("hidden");
     loadPrefs();
+    restoreFilters();
     await loadAll(false);
     loadModels().catch(() => {});
     setTimeout(() => loadAll(true).catch(() => {}), 250);
@@ -605,9 +629,9 @@
   $("addVertexBtn")?.addEventListener("click", () => addVertexKey().catch((err) => toast(err.message)));
   $("refreshBtn")?.addEventListener("click", () => loadAll(true).catch((err) => toast(err.message)));
   $("refreshModelsBtn")?.addEventListener("click", () => loadModels().catch((err) => toast(err.message)));
-  $("filterSearch")?.addEventListener("input", renderAccounts);
-  $("filterProvider")?.addEventListener("change", renderAccounts);
-  $("filterStatus")?.addEventListener("change", renderAccounts);
+  $("filterSearch")?.addEventListener("input", () => { persistFilters(); renderAccounts(); });
+  $("filterProvider")?.addEventListener("change", () => { persistFilters(); renderAccounts(); });
+  $("filterStatus")?.addEventListener("change", () => { persistFilters(); renderAccounts(); });
   $("selectAll")?.addEventListener("change", (ev) => {
     selected.clear();
     if (ev.target.checked) filtered().forEach((a) => selected.add(`${a.provider || "antigravity"}:${a.id}`));
