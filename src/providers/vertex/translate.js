@@ -403,18 +403,6 @@ export function recoverMalformedVertexRequest(wrapped, { attempt = 2, lastFinish
   if (!wrapped || attempt <= 1) return wrapped;
   const req = wrapped.request || {};
   const nextReq = { ...req };
-  const gen = { ...(req.generationConfig || {}) };
-  // Vary temperature slightly so the sampler does not deterministically hit the exact same
-  // malformed token sequence in the cached KV state.
-  gen.temperature = attempt === 2 ? 0.4 : 0.7;
-  if (gen.thinkingConfig && typeof gen.thinkingConfig === "object") {
-    const tc = { ...gen.thinkingConfig };
-    if (attempt >= 3 && tc.thinkingLevel === "HIGH") {
-      tc.thinkingLevel = "MEDIUM";
-    }
-    gen.thinkingConfig = tc;
-  }
-  nextReq.generationConfig = gen;
   if (req.tools) {
     // Switch between AUTO and VALIDATED and nudge the final turn so the model emits a clean call.
     nextReq.toolConfig = {

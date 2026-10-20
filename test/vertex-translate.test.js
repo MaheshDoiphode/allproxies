@@ -227,7 +227,10 @@ test("vertex tool requests set VALIDATED functionCallingConfig and recover on MA
     functionCallingConfig: { mode: "VALIDATED" },
   });
   const retry2 = recoverMalformedVertexRequest(wrapped, { attempt: 2, lastFinish: "MALFORMED_RESPONSE" });
-  assert.equal(retry2.request.generationConfig.temperature, 0.4);
+  assert.equal(retry2.request.generationConfig.temperature, undefined);
+  assert.equal(retry2.request.generationConfig.thinkingConfig.thinkingLevel, "HIGH");
+  const retry3 = recoverMalformedVertexRequest(wrapped, { attempt: 3, lastFinish: "MALFORMED_RESPONSE" });
+  assert.equal(retry3.request.generationConfig.thinkingConfig.thinkingLevel, "HIGH");
   assert.deepEqual(retry2.request.toolConfig, {
     functionCallingConfig: { mode: "AUTO" },
   });

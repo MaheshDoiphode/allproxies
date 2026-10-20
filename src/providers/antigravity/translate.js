@@ -462,16 +462,6 @@ export function recoverMalformedRequest(wrapped, { attempt = 2, lastFinish = "" 
   if (!wrapped || attempt <= 1) return wrapped;
   const req = wrapped.request || {};
   const nextReq = { ...req };
-  const gen = { ...(req.generationConfig || {}) };
-  gen.temperature = attempt === 2 ? 0.4 : 0.7;
-  if (gen.thinkingConfig && typeof gen.thinkingConfig === "object") {
-    const tc = { ...gen.thinkingConfig };
-    if (attempt >= 3 && tc.thinkingLevel && String(tc.thinkingLevel).toLowerCase() === "high") {
-      tc.thinkingLevel = "medium";
-    }
-    gen.thinkingConfig = tc;
-  }
-  nextReq.generationConfig = gen;
   if (req.tools && !String(wrapped.model).toLowerCase().includes("claude")) {
     nextReq.toolConfig = {
       functionCallingConfig: { mode: attempt % 2 === 0 ? "AUTO" : "VALIDATED" },
