@@ -11,6 +11,7 @@ import {
   withVertexProjectPath,
 } from "../../core/vertex-constants.js";
 import { AuthRequiredError, HttpError, UpstreamError } from "../../core/errors.js";
+import { formatIst } from "../../core/time.js";
 import { iterateSse, request, requestJson } from "../../http/request.js";
 import { ResponseStore } from "../antigravity/responses-store.js";
 import { streamAnthropicMessages } from "../anthropic-stream.js";
@@ -266,8 +267,8 @@ export class VertexClient {
     const accounts = this.accounts();
     const current = this.activeAccount();
     const usable = (item) => vertexApiKeyOf(item) && !isAccountDisabled(item, now) && !skip.has(accountIdOf(item));
-    if (usable(current)) return current;
     const ready = accounts.filter(usable).sort((a, b) => (a.last_used || 0) - (b.last_used || 0));
+    if (usable(current) && ready.length <= 1) return current;
     if (ready[0]) {
       if (!current || accountIdOf(ready[0]) !== accountIdOf(current)) this.store.use(accountIdOf(ready[0]));
       return ready[0];
@@ -276,7 +277,7 @@ export class VertexClient {
     const soonest = accounts
       .filter((item) => vertexApiKeyOf(item) && Number(item.disabled_until || 0) > now)
       .sort((a, b) => Number(a.disabled_until || 0) - Number(b.disabled_until || 0))[0];
-    const until = soonest?.disabled_until ? new Date(soonest.disabled_until).toISOString() : "later";
+    const until = soonest?.disabled_until ? formatIst(soonest.disabled_until) : "later";
     throw new AuthRequiredError(`All Vertex keys are rate-limited until ${until}. Add another Express Mode key.`);
   }
 
@@ -294,8 +295,12 @@ export class VertexClient {
     );
     if (transient && !hasOther) return null;
     const reason = String(err?.code || err?.message || "upstream").slice(0, 180);
-    const disabled = disableAccount(bundle, { until: cooldownUntil(err), reason });
-    this.store.save(createVertexBundle(disabled), { activate: false });
+    const until = cooldownUntil(err);
+    const nextState = until > Date.now()
+      ? disableAccount(bundle, { until, reason })
+      : createVertexBundle({ ...hydrateVertexBundle(bundle), disabled_until: 0, disabled_reason: isQuotaError(err) ? reason : bundle.disabled_reason });
+    this.store.save(createVertexBundle(nextState), { activate: false });
+    const disabled = nextState;
     const next = this.accounts()
       .filter((item) => vertexApiKeyOf(item) && !isAccountDisabled(item) && accountIdOf(item) !== accountIdOf(disabled))
       .sort((a, b) => (a.last_used || 0) - (b.last_used || 0))[0];
@@ -322,7 +327,20 @@ export class VertexClient {
         message = String(payload.message);
       }
     }
-    throw new UpstreamError(response.status, message, code ? String(code) : undefined);
+    const retryAfter = response.headers?.["retry-after"] ?? response.headers?.["Retry-After"];
+    let retryAfterMs = 0;
+    if (retryAfter != null && retryAfter !== "") {
+      const seconds = Number(retryAfter);
+      if (Number.isFinite(seconds) && seconds >= 0) retryAfterMs = Math.round(seconds * 1000);
+      else {
+        const when = Date.parse(String(retryAfter));
+        if (!Number.isNaN(when)) retryAfterMs = Math.max(0, when - Date.now());
+      }
+    }
+    throw new UpstreamError(response.status, message, code ? String(code) : undefined, {
+      retryAfterMs,
+      headers: response.headers || null,
+    });
   }
 
   async post(url, payload, { stream = false } = {}) {

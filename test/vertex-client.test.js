@@ -297,3 +297,58 @@ test("vertex does not overwrite a stored console project from a 404 rewrite", as
     await up.close();
   }
 });
+
+test("vertex quota on one key fails over to the next", async () => {
+  const dir = tempDir();
+  const keys = [];
+  const up = await mockServer(({ req, res }) => {
+    const key = req.headers["x-goog-api-key"] || "";
+    keys.push(key);
+    if (key === "AQ.first") {
+      sendJson(res, 429, {
+        error: {
+          message: "Resource exhausted. Please try again later. Please refer to https://cloud.google.com/vertex-ai/generative-ai/docs/error-code-429 for more details.",
+          status: "RESOURCE_EXHAUSTED",
+        },
+      });
+      return;
+    }
+    sendJson(res, 200, {
+      candidates: [{ content: { parts: [{ text: "from-second" }] }, finishReason: "STOP" }],
+    });
+  });
+  const tokenPath = path.join(dir, "vertex-tokens.db");
+  const store = new TokenStore(tokenPath);
+  store.save(createVertexBundle({
+    api_key: "AQ.first",
+    label: "cpt",
+    email: "cpt",
+    project_id: "project-one",
+  }));
+  store.save(createVertexBundle({
+    api_key: "AQ.second",
+    label: "cpt.brb.jfq",
+    email: "cpt.brb.jfq",
+    project_id: "project-two",
+  }));
+  store.use("cpt");
+  const vertex = new VertexClient(testSettings(dir, {
+    vertexTokenPath: tokenPath,
+    vertexBaseUrl: up.url,
+    liveModels: false,
+  }));
+  try {
+    const out = await vertex.chatCompletions({
+      model: "vertex/gemini-3.8-flash",
+      messages: [{ role: "user", content: "hi" }],
+    });
+    assert.equal(out.choices[0].message.content, "from-second");
+    assert.equal(vertex.activeAccount().email, "cpt.brb.jfq");
+    const limited = vertex.findAccount("cpt");
+    assert.ok(!Number(limited.disabled_until) || Number(limited.disabled_until) <= Date.now());
+    assert.match(String(limited.disabled_reason || ""), /RESOURCE_EXHAUSTED/i);
+    assert.deepEqual(keys, ["AQ.first", "AQ.second"]);
+  } finally {
+    await up.close();
+  }
+});

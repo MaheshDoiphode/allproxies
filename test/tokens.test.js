@@ -15,6 +15,7 @@ import {
   parseResetMs,
   projectOf,
 } from "../src/providers/antigravity/tokens.js";
+import { formatIst } from "../src/core/time.js";
 import { tempDir } from "./helpers.js";
 
 test("token store roundtrip", () => {
@@ -164,4 +165,17 @@ test("quota helpers parse reset and match 429", () => {
   assert.equal(isRetryableUpstreamError({ status: 400, message: "project not found" }), true);
   const cooled = cooldownUntil({ status: 503, message: "unavailable" }, now);
   assert.equal(cooled, now + 30_000);
+  assert.equal(cooldownUntil({ status: 429, message: "RESOURCE_EXHAUSTED" }, now), 0);
+  assert.equal(cooldownUntil({ status: 429, message: "RESOURCE_EXHAUSTED", retryAfterMs: 2000 }, now), now + 2000);
+  assert.equal(
+    cooldownUntil({ status: 429, message: "Quota exceeded. Limit resets 2026-10-10T01:00:00Z" }, now),
+    Date.parse("2026-10-10T01:00:00Z"),
+  );
+});
+
+test("formatIst prints Asia/Kolkata instead of UTC", () => {
+  const text = formatIst("2026-10-20T01:57:55.176Z");
+  assert.match(text, /20/);
+  assert.match(text, /7:27:55/i);
+  assert.match(text, /IST|GMT\+5:30|India/i);
 });

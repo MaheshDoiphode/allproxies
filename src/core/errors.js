@@ -21,10 +21,12 @@ export class AuthRequiredError extends HttpError {
 }
 
 export class UpstreamError extends HttpError {
-  constructor(status, message, code) {
+  constructor(status, message, code, extra = {}) {
     super(status, message, { type: "upstream_error", code });
     this.name = "UpstreamError";
     this.code = code ? String(code) : undefined;
+    this.retryAfterMs = Number(extra.retryAfterMs || 0) || 0;
+    this.headers = extra.headers || null;
   }
 }
 

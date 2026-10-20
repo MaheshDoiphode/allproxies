@@ -7,6 +7,7 @@ import { AntigravityClient } from "./providers/antigravity/client.js";
 import { ChatgptClient } from "./providers/chatgpt/client.js";
 import { VertexClient } from "./providers/vertex/client.js";
 import { accountIdOf, isExpired, projectOf } from "./providers/antigravity/tokens.js";
+import { formatIst } from "./core/time.js";
 import { startServer } from "./server.js";
 
 function usage() {
@@ -224,7 +225,7 @@ async function main(argv = process.argv.slice(2)) {
           `expired=${isExpired(bundle)}`,
         ];
         if (summary.enabled === false) bits.push("disabled");
-        if (summary.limited) bits.push(`limited_until=${new Date(summary.disabled_until).toISOString()}`);
+        if (summary.limited) bits.push(`limited_until=${formatIst(summary.disabled_until)}`);
         if (summary.quotas?.length) {
           bits.push(
             "quotas=" +
@@ -250,7 +251,7 @@ async function main(argv = process.argv.slice(2)) {
           `expired=${isExpired(bundle)}`,
         ];
         if (summary.enabled === false) bits.push("disabled");
-        if (summary.limited) bits.push(`limited_until=${new Date(summary.disabled_until).toISOString()}`);
+        if (summary.limited) bits.push(`limited_until=${formatIst(summary.disabled_until)}`);
         if (summary.quotas?.length) {
           bits.push(
             "quotas=" +
@@ -276,7 +277,7 @@ async function main(argv = process.argv.slice(2)) {
           summary.project_id ? `project=${summary.project_id}` : null,
         ].filter(Boolean);
         if (summary.enabled === false) bits.push("disabled");
-        if (summary.limited) bits.push(`limited_until=${new Date(summary.disabled_until).toISOString()}`);
+        if (summary.limited) bits.push(`limited_until=${formatIst(summary.disabled_until)}`);
         console.log(bits.join("  "));
       }
       if (active) console.log(`vertex active: ${active.email || accountIdOf(active)}`);

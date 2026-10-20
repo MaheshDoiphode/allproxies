@@ -58,6 +58,25 @@
     return 0;
   }
 
+  const IST_TZ = "Asia/Kolkata";
+
+  function formatIst(value) {
+    if (value == null || value === "") return "";
+    const t = typeof value === "number" ? (value > 1e12 || value < 0 ? value : value * 1000) : Date.parse(value);
+    if (!Number.isFinite(t)) return String(value);
+    return new Intl.DateTimeFormat("en-IN", {
+      timeZone: IST_TZ,
+      year: "numeric",
+      month: "short",
+      day: "2-digit",
+      hour: "2-digit",
+      minute: "2-digit",
+      second: "2-digit",
+      hour12: true,
+      timeZoneName: "short",
+    }).format(new Date(t));
+  }
+
   function compactCount(value) {
     const n = Number(value || 0);
     if (!Number.isFinite(n) || n === 0) return "0";
@@ -85,7 +104,7 @@
     if (m < 60) return `resets in ${m}m`;
     const h = Math.round(m / 60);
     if (h < 36) return `resets in ${h}h`;
-    return `resets ${new Date(t).toLocaleString()}`;
+    return `resets ${formatIst(t)}`;
   }
 
   function windowLabel(q) {
@@ -114,7 +133,7 @@
 
   function statusBadge(a) {
     if (a.enabled === false) return '<span class="badge">disabled</span>';
-    if (a.limited) return '<span class="badge warn">limited</span>';
+    if (a.limited) return `<span class="badge warn" title="${escapeHtml(formatIst(a.disabled_until))}">limited until ${escapeHtml(formatIst(a.disabled_until))}</span>`;
     if (a.expired) return '<span class="badge warn">refreshing…</span>';
     return '<span class="badge ok">ready</span>';
   }

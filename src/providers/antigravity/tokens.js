@@ -142,7 +142,7 @@ export function usageFromBundle(bundle) {
 }
 
 export function disableAccount(bundle, { until, reason, now = Date.now() } = {}) {
-  const untilMs = parseResetMs(until, now) || now + 3_600_000;
+  const untilMs = parseResetMs(until, now) || 0;
   return createBundle({
     ...bundle,
     disabled_until: untilMs,
@@ -193,8 +193,28 @@ export function isRetryableUpstreamError(err) {
   );
 }
 
+export function retryAfterMsFrom(err) {
+  const hinted = Number(err?.retryAfterMs || 0);
+  if (hinted > 0) return hinted;
+  const headers = err?.headers;
+  if (headers && typeof headers === "object") {
+    const raw = headers["retry-after"] ?? headers["Retry-After"];
+    if (raw != null && raw !== "") {
+      const seconds = Number(raw);
+      if (Number.isFinite(seconds) && seconds >= 0) return Math.round(seconds * 1000);
+      const when = Date.parse(String(raw));
+      if (!Number.isNaN(when)) return Math.max(0, when - Date.now());
+    }
+  }
+  return 0;
+}
+
 export function cooldownUntil(err, now = Date.now()) {
-  if (isQuotaError(err)) return parseResetMs(resetHintFromError(err), now) || now + 3_600_000;
+  const retryAfter = retryAfterMsFrom(err);
+  if (retryAfter > 0) return now + retryAfter;
+  const hinted = parseResetMs(resetHintFromError(err), now);
+  if (hinted) return hinted;
+  if (isQuotaError(err)) return 0;
   const status = Number(err?.status || 0);
   if (status === 401 || err?.name === "OAuthError") return now + 300_000;
   if (status === 403 || err?.name === "ProjectError") return now + 120_000;

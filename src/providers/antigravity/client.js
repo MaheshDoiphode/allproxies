@@ -11,6 +11,7 @@ import {
 } from "../../core/constants.js";
 import crypto from "node:crypto";
 import { AuthRequiredError, HttpError, OAuthError, ProjectError, UpstreamError } from "../../core/errors.js";
+import { formatIst } from "../../core/time.js";
 import { iterateSse, request, requestJson } from "../../http/request.js";
 import { loadStaticCatalog, mergeCatalog, parseLiveModels, resolveRequestRoute } from "./catalog.js";
 import { fetchHubVersion, requestHeaders, resolveHubVersion, stripApiKeyHeaders } from "./headers.js";
@@ -268,7 +269,7 @@ export class AntigravityClient {
     const soonest = accounts
       .filter((item) => item?.refresh_token && Number(item.disabled_until || 0) > now)
       .sort((a, b) => Number(a.disabled_until || 0) - Number(b.disabled_until || 0))[0];
-    const until = soonest?.disabled_until ? new Date(soonest.disabled_until).toISOString() : "later";
+    const until = soonest?.disabled_until ? formatIst(soonest.disabled_until) : "later";
     throw new AuthRequiredError(`All Antigravity accounts are rate-limited until ${until}. Add another from the dashboard or: node src/cli.js login`);
   }
 

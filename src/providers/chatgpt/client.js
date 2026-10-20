@@ -6,6 +6,7 @@ import {
   CHATGPT_USER_AGENT,
 } from "../../core/chatgpt-constants.js";
 import { AuthRequiredError, HttpError, OAuthError, UpstreamError } from "../../core/errors.js";
+import { formatIst } from "../../core/time.js";
 import { iterateSse, request, requestJson } from "../../http/request.js";
 import { ResponseStore } from "../antigravity/responses-store.js";
 import { chatgptModelMeta, parseChatgptModels } from "./catalog.js";
@@ -326,7 +327,7 @@ export class ChatgptClient {
     const soonest = accounts
       .filter((item) => item?.refresh_token && Number(item.disabled_until || 0) > now)
       .sort((a, b) => Number(a.disabled_until || 0) - Number(b.disabled_until || 0))[0];
-    const until = soonest?.disabled_until ? new Date(soonest.disabled_until).toISOString() : "later";
+    const until = soonest?.disabled_until ? formatIst(soonest.disabled_until) : "later";
     throw new AuthRequiredError(`All ChatGPT accounts are rate-limited until ${until}. Add another from the dashboard or: node src/cli.js login-chatgpt`);
   }
 
