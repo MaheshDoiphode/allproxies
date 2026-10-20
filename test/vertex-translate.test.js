@@ -185,9 +185,9 @@ test("gemini-4-argon maps thinking and routing properly", () => {
   });
 });
 
-test("long multimodal chats strip historical inline images and keep recent turns", () => {
+test("long multimodal chats preserve all inline images and produce a stable sessionKey for cache hits", () => {
   const messages = [];
-  for (let i = 0; i < 6; i += 1) {
+  for (let i = 0; i < 10; i += 1) {
     messages.push({
       role: "user",
       content: [
@@ -195,22 +195,21 @@ test("long multimodal chats strip historical inline images and keep recent turns
         { type: "image", source: { type: "base64", media_type: "image/png", data: "A".repeat(1000) } },
       ],
     });
-    if (i < 5) {
+    if (i < 9) {
       messages.push({
         role: "assistant",
         content: [{ type: "text", text: `reply ${i}` }],
       });
     }
   }
-  const wrapped = anthropicToVertex({ model: "gemini-4-argon", messages }, { model: "gemini-4-argon" });
+  const wrapped = anthropicToVertex({ model: "gemini-4-argon", system: "sys", messages }, { model: "gemini-4-argon" });
   const contents = wrapped.request.contents;
-  assert.equal(contents.length, 11);
-  // Early turns (before the last 4 turns) have their inlineData replaced with a text placeholder
-  assert.ok(!contents[0].parts.some((p) => p.inlineData));
-  assert.ok(contents[0].parts.some((p) => p.text === "[previous image attachment omitted]"));
-  // Recent turns retain their inlineData
-  const recentUserTurn = contents[contents.length - 1];
-  assert.ok(recentUserTurn.parts.some((p) => p.inlineData));
+  assert.equal(contents.length, 19);
+  assert.ok(wrapped.sessionKey);
+  // Both early and recent turns retain their inlineData so visual context is never lost
+  // and the prefix never mutates (keeping Google's implicit prefix KV-cache valid)
+  assert.ok(contents[0].parts.some((p) => p.inlineData));
+  assert.ok(contents[contents.length - 1].parts.some((p) => p.inlineData));
 });
 
 

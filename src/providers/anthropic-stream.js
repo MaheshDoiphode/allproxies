@@ -104,7 +104,7 @@ export async function* streamAnthropicMessages({ open, makeAccumulator, maxAttem
     try {
       for await (const event of withIdlePings(open())) {
         if (event?.__ping) {
-          if (opened) yield formatSse("ping", { type: "ping" });
+          yield formatSse("ping", { type: "ping" });
           continue;
         }
         for (const item of acc.ingest(event)) {

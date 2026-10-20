@@ -74,7 +74,31 @@ export class VertexClient {
     this.catalog = { at: 0, error: null, listed: this.modelsCache.models.length, source: "express" };
     this.stats = { requests: 0, success: 0, failed: 0, prompt_tokens: 0, completion_tokens: 0 };
     this.inFlight = new Map();
+    this.sessionPins = new Map();
     this.catalogPromise = null;
+  }
+
+  rememberSessionAccount(sessionKey, bundle) {
+    if (!sessionKey || !bundle) return;
+    const id = accountIdOf(bundle);
+    if (!id) return;
+    if (this.sessionPins.size > 256) {
+      const oldest = this.sessionPins.keys().next().value;
+      if (oldest) this.sessionPins.delete(oldest);
+    }
+    this.sessionPins.delete(sessionKey);
+    this.sessionPins.set(sessionKey, { accountId: id, at: Date.now() });
+  }
+
+  pinnedAccountFor(sessionKey) {
+    if (!sessionKey) return null;
+    const entry = this.sessionPins.get(sessionKey);
+    if (!entry) return null;
+    if (Date.now() - entry.at > 30 * 60 * 1000) {
+      this.sessionPins.delete(sessionKey);
+      return null;
+    }
+    return entry.accountId;
   }
 
   inFlightOf(item) {
@@ -279,7 +303,7 @@ export class VertexClient {
     return this.accounts();
   }
 
-  requireBundle({ exclude = [] } = {}) {
+  requireBundle({ exclude = [], sessionKey = null } = {}) {
     const skip = new Set([...exclude].map((id) => String(id || "").toLowerCase()).filter(Boolean));
     const accounts = this.accounts();
     const current = this.activeAccount();
@@ -292,6 +316,14 @@ export class VertexClient {
       throw new AuthRequiredError("All Vertex keys are disabled. Enable one in the dashboard.");
     }
     const minBusy = Math.min(...pool.map((item) => this.inFlightOf(item)));
+    // Preserve conversation-to-project affinity so Google Vertex's implicit prefix KV-cache
+    // (systemInstruction + tools + prior turns) stays warm on the same GCP project, while
+    // concurrent conversations from other VS Code windows spread onto idle keys.
+    const pinnedId = this.pinnedAccountFor(sessionKey);
+    if (pinnedId) {
+      const pinned = pool.find((item) => accountIdOf(item) === pinnedId);
+      if (pinned && this.inFlightOf(pinned) <= minBusy) return pinned;
+    }
     if (usable(current) && this.inFlightOf(current) <= minBusy) return current;
     const next = pool
       .slice()
@@ -365,7 +397,7 @@ export class VertexClient {
     });
   }
 
-  async post(url, payload, { stream = false, maxPasses = 5, retryDelayMs = 1500 } = {}) {
+  async post(url, payload, { stream = false, maxPasses = 5, retryDelayMs = 1500, sessionKey = null } = {}) {
     let lastError;
     let recoveredOnce = false;
     for (let pass = 0; pass < maxPasses; pass += 1) {
@@ -373,7 +405,7 @@ export class VertexClient {
       for (let attempt = 0; attempt < 8; attempt += 1) {
         let bundle;
         try {
-          bundle = this.requireBundle({ exclude: tried });
+          bundle = this.requireBundle({ exclude: tried, sessionKey });
         } catch (err) {
           if (!lastError) lastError = err;
           break;
@@ -396,6 +428,7 @@ export class VertexClient {
           throw err;
         }
         if (response.status < 400) {
+          this.rememberSessionAccount(sessionKey, bundle);
           response.bundle = bundle;
           response.releaseSlot = releaseSlot;
           if (!stream) releaseSlot();
@@ -631,23 +664,51 @@ export class VertexClient {
   async generate(wrapped, { onBundle } = {}) {
     const body = vertexHttpBody(wrapped);
     if (this.settings.debugRequests) {
-      console.log(`[vertex] generate ${wrapped.model} last=${body.contents?.at?.(-1)?.role} turns=${this.describeContents(body.contents).map((t) => `${t.role}:${t.parts.map((p) => Object.keys(p)[0]).join("+")}`).join(",")}`);
+      console.log(`[vertex] generate ${wrapped.model} session=${wrapped.sessionKey || "-"} last=${body.contents?.at?.(-1)?.role} turns=${this.describeContents(body.contents).map((t) => `${t.role}:${t.parts.map((p) => Object.keys(p)[0]).join("+")}`).join(",")}`);
     }
-    const response = await this.post(this.generateUrl(wrapped.model), body);
+    const response = await this.post(this.generateUrl(wrapped.model), body, { sessionKey: wrapped.sessionKey });
     onBundle?.(response.bundle);
     return response.body ? JSON.parse(response.body) : {};
   }
 
   async *stream(wrapped, { onBundle } = {}) {
     const body = vertexHttpBody(wrapped);
+    const t0 = Date.now();
     if (this.settings.debugRequests) {
-      console.log(`[vertex] stream ${wrapped.model} last=${body.contents?.at?.(-1)?.role} turns=${this.describeContents(body.contents).map((t) => `${t.role}:${t.parts.map((p) => Object.keys(p)[0]).join("+")}`).join(",")}`);
+      console.log(`[vertex] stream ${wrapped.model} session=${wrapped.sessionKey || "-"} last=${body.contents?.at?.(-1)?.role} turns=${this.describeContents(body.contents).map((t) => `${t.role}:${t.parts.map((p) => Object.keys(p)[0]).join("+")}`).join(",")}`);
     }
-    const response = await this.post(this.streamUrl(wrapped.model), body, { stream: true });
+    const response = await this.post(this.streamUrl(wrapped.model), body, { stream: true, sessionKey: wrapped.sessionKey });
+    const usedKey = response.bundle?.email || accountIdOf(response.bundle);
+    if (this.settings.debugRequests) {
+      console.log(`[vertex] stream ${wrapped.model} key=${usedKey} session=${wrapped.sessionKey || "-"} headers=${Date.now() - t0}ms status=${response.status}`);
+    }
     onBundle?.(response.bundle);
+    let chunks = 0;
+    let promptTokens = 0;
+    let cachedTokens = 0;
+    let outputTokens = 0;
     try {
-      for await (const event of iterateSse(response.stream)) yield event;
+      for await (const event of iterateSse(response.stream, {
+        onFirstBytes: () => {
+          if (this.settings.debugRequests) {
+            console.log(`[vertex] stream ${wrapped.model} key=${usedKey} first-chunk=${Date.now() - t0}ms`);
+          }
+        },
+      })) {
+        chunks += 1;
+        const meta = event?.usageMetadata || event?.response?.usageMetadata;
+        if (meta) {
+          if (meta.promptTokenCount) promptTokens = meta.promptTokenCount;
+          if (meta.cachedContentTokenCount) cachedTokens = meta.cachedContentTokenCount;
+          if (meta.candidatesTokenCount) outputTokens = meta.candidatesTokenCount;
+        }
+        yield event;
+      }
     } finally {
+      if (this.settings.debugRequests) {
+        const hitPct = promptTokens > 0 ? Math.round((cachedTokens / promptTokens) * 100) : 0;
+        console.log(`[vertex] stream ${wrapped.model} key=${usedKey} done=${Date.now() - t0}ms events=${chunks} prompt=${promptTokens} cached=${cachedTokens}(${hitPct}%) out=${outputTokens}`);
+      }
       response.releaseSlot?.();
       response.stream?.resume();
     }

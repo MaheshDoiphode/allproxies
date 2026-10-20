@@ -647,3 +647,94 @@ test("vertex streams multiple concurrent /v1/messages SSE requests in parallel w
   }
 });
 
+test("vertex pins each conversation session to its project key for cache hits while keeping separate windows on separate keys", async () => {
+  const dir = tempDir();
+  const seen = [];
+  let releaseFirst;
+  const firstEntered = new Promise((resolve) => {
+    releaseFirst = resolve;
+  });
+  let unblockFirst;
+  const holdFirst = new Promise((resolve) => {
+    unblockFirst = resolve;
+  });
+  const up = await mockServer(async ({ req, url, res }) => {
+    const key = req.headers["x-goog-api-key"];
+    seen.push({ key, path: url.pathname });
+    if (seen.length === 1) {
+      releaseFirst();
+      await holdFirst;
+    }
+    sendJson(res, 200, {
+      candidates: [{ content: { parts: [{ text: `ok:${key}` }] }, finishReason: "STOP" }],
+      usageMetadata: { promptTokenCount: 2000, cachedContentTokenCount: 1800, candidatesTokenCount: 50 },
+    });
+  });
+  const tokenPath = path.join(dir, "vertex-tokens.db");
+  const store = new TokenStore(tokenPath);
+  store.save(createVertexBundle({
+    api_key: "AQ.first",
+    label: "cpt",
+    email: "cpt",
+    project_id: "project-one",
+  }));
+  store.save(createVertexBundle({
+    api_key: "AQ.second",
+    label: "cpt.brb.jfq",
+    email: "cpt.brb.jfq",
+    project_id: "project-two",
+  }));
+  store.use("cpt");
+  const vertex = new VertexClient(testSettings(dir, {
+    vertexTokenPath: tokenPath,
+    vertexBaseUrl: up.url,
+    liveModels: false,
+  }));
+  try {
+    // Conversation A turn 1 -> goes to AQ.first (in flight)
+    const turnA1 = vertex.messages({
+      model: "vertex/gemini-4-argon",
+      system: "Project A workspace",
+      messages: [{ role: "user", content: "build hero section" }],
+    });
+    await firstEntered;
+    // Conversation B turn 1 arrives while A is running -> picks idle AQ.second and pins B to AQ.second
+    await vertex.messages({
+      model: "vertex/gemini-4-argon",
+      system: "Project B workspace",
+      messages: [{ role: "user", content: "fix proxy bug" }],
+    });
+    unblockFirst();
+    await turnA1;
+    // Now both keys are idle. Even if activeAccount changed, Conversation A turn 2 stays pinned to AQ.first
+    // and Conversation B turn 2 stays pinned to AQ.second so both get Vertex prefix KV-cache hits!
+    await vertex.messages({
+      model: "vertex/gemini-4-argon",
+      system: "Project B workspace",
+      messages: [
+        { role: "user", content: "fix proxy bug" },
+        { role: "assistant", content: "done" },
+        { role: "user", content: "add tests" },
+      ],
+    });
+    await vertex.messages({
+      model: "vertex/gemini-4-argon",
+      system: "Project A workspace",
+      messages: [
+        { role: "user", content: "build hero section" },
+        { role: "assistant", content: "done" },
+        { role: "user", content: "now add 3d model" },
+      ],
+    });
+    assert.deepEqual(seen.map((item) => item.key), [
+      "AQ.first",
+      "AQ.second",
+      "AQ.second",
+      "AQ.first",
+    ]);
+  } finally {
+    await up.close();
+  }
+});
+
+

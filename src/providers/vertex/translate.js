@@ -1,3 +1,4 @@
+import crypto from "node:crypto";
 import { VERTEX_IMAGE_ASPECT_RATIOS, VERTEX_IMAGE_SIZES, VERTEX_THINKING_LEVELS } from "../../core/vertex-constants.js";
 import { extractEffortFromBody, normalizeEffort } from "../antigravity/catalog.js";
 import {
@@ -351,46 +352,33 @@ function estimateTurnSize(turn) {
   return chars;
 }
 
-function stripOldTurnImages(contents, keepRecentTurnsWithMedia = 4) {
-  if (!Array.isArray(contents) || contents.length <= keepRecentTurnsWithMedia) return contents;
-  const cutoff = Math.max(0, contents.length - keepRecentTurnsWithMedia);
-  let changed = false;
-  const next = contents.map((turn, idx) => {
-    if (idx >= cutoff || !turn || !Array.isArray(turn.parts)) return turn;
-    let turnChanged = false;
-    const parts = turn.parts.map((part) => {
-      if (!part || typeof part !== "object") return part;
-      if (part.inlineData) {
-        turnChanged = true;
-        return { text: "[previous image attachment omitted]" };
-      }
-      if (part.functionResponse && Array.isArray(part.functionResponse.parts) && part.functionResponse.parts.length) {
-        turnChanged = true;
-        const { parts: _dropped, ...restFr } = part.functionResponse;
-        return { functionResponse: restFr };
-      }
-      return part;
-    });
-    if (!turnChanged) return turn;
-    changed = true;
-    return { ...turn, parts };
-  });
-  return changed ? next : contents;
-}
-
-export function pruneContentsIfTooLarge(contents, maxChars = 900_000) {
+export function pruneContentsIfTooLarge(contents, maxChars = 3_200_000) {
   if (!Array.isArray(contents) || contents.length <= 2) return contents;
-  const slimmed = stripOldTurnImages(contents);
   let totalChars = 0;
-  for (const turn of slimmed) totalChars += estimateTurnSize(turn);
-  if (totalChars <= maxChars) return slimmed;
+  for (const turn of contents) totalChars += estimateTurnSize(turn);
+  if (totalChars <= maxChars) return contents;
 
-  const pruned = [...slimmed];
+  const pruned = [...contents];
   while (pruned.length > 2 && totalChars > maxChars) {
     const dropped = pruned.splice(1, 1)[0];
     totalChars -= estimateTurnSize(dropped);
   }
   return normalizeContents(pruned);
+}
+
+export function sessionKeyFromRequest(request = {}) {
+  const sysText = (request.systemInstruction?.parts || []).map((p) => p?.text || "").join("\n").slice(0, 4096);
+  const firstTurn = request.contents?.[0];
+  const firstText = (firstTurn?.parts || [])
+    .map((p) => {
+      if (typeof p?.text === "string") return p.text.slice(0, 2048);
+      if (p?.functionCall) return `call:${p.functionCall.name}`;
+      if (p?.functionResponse) return `resp:${p.functionResponse.name}`;
+      return "";
+    })
+    .join("|");
+  if (!sysText && !firstText) return null;
+  return crypto.createHash("sha1").update(`${sysText}\0${firstText}`).digest("hex").slice(0, 16);
 }
 
 export function wrapVertexGenerate({ model, contents, system, generation, tools }) {
@@ -400,7 +388,7 @@ export function wrapVertexGenerate({ model, contents, system, generation, tools 
   if (system) request.systemInstruction = system;
   if (generation && Object.keys(generation).length) request.generationConfig = generation;
   if (tools) request.tools = tools;
-  return { model, request };
+  return { model, sessionKey: sessionKeyFromRequest(request), request };
 }
 
 export function openaiToVertex(body, { model, effort } = {}) {
