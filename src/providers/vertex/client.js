@@ -11,7 +11,6 @@ import {
   withVertexProjectPath,
 } from "../../core/vertex-constants.js";
 import { AuthRequiredError, HttpError, UpstreamError } from "../../core/errors.js";
-import { formatIst } from "../../core/time.js";
 import { iterateSse, request, requestJson } from "../../http/request.js";
 import { ResponseStore } from "../antigravity/responses-store.js";
 import { streamAnthropicMessages } from "../anthropic-stream.js";
@@ -19,11 +18,10 @@ import { loadStaticVertexCatalog, mergeVertexCatalog, nextPageTokenOf, parseVert
 import {
   TokenStore,
   accountIdOf,
-  cooldownUntil,
   createVertexBundle,
-  disableAccount,
   hydrateVertexBundle,
   isAccountDisabled,
+  isManuallyDisabled,
   isQuotaError,
   isRetryableUpstreamError,
   setAccountEnabled,
@@ -195,8 +193,8 @@ export class VertexClient {
     this.store.save(createVertexBundle(next), { activate: enabled });
     if (enabled) this.store.use(accountIdOf(next));
     else if (accountIdOf(this.store.load()) === accountIdOf(next)) {
-      const ready = this.accounts().find((item) => !isAccountDisabled(item) && accountIdOf(item) !== accountIdOf(next));
-      if (ready) this.store.use(accountIdOf(ready));
+      const fallback = this.accounts().find((item) => !isManuallyDisabled(item) && vertexApiKeyOf(item) && accountIdOf(item) !== accountIdOf(next));
+      if (fallback) this.store.use(accountIdOf(fallback));
     }
     return this.findAccount(id);
   }
@@ -262,23 +260,20 @@ export class VertexClient {
   }
 
   requireBundle({ exclude = [] } = {}) {
-    const now = Date.now();
     const skip = new Set([...exclude].map((id) => String(id || "").toLowerCase()).filter(Boolean));
     const accounts = this.accounts();
     const current = this.activeAccount();
-    const usable = (item) => vertexApiKeyOf(item) && !isAccountDisabled(item, now) && !skip.has(accountIdOf(item));
-    const ready = accounts.filter(usable).sort((a, b) => (a.last_used || 0) - (b.last_used || 0));
-    if (usable(current) && ready.length <= 1) return current;
-    if (ready[0]) {
-      if (!current || accountIdOf(ready[0]) !== accountIdOf(current)) this.store.use(accountIdOf(ready[0]));
-      return ready[0];
+    // Enabled keys stay in the pool. Dashboard "ready"/last-used and leftover disabled_until
+    // parks must not hide a key the user left enabled.
+    const usable = (item) => vertexApiKeyOf(item) && !isManuallyDisabled(item) && !skip.has(accountIdOf(item));
+    if (usable(current)) return current;
+    const next = accounts.filter(usable).sort((a, b) => (a.last_used || 0) - (b.last_used || 0))[0];
+    if (next) {
+      if (!current || accountIdOf(next) !== accountIdOf(current)) this.store.use(accountIdOf(next));
+      return next;
     }
     if (!accounts.length) throw new AuthRequiredError("Vertex login required. Add an Express Mode API key.");
-    const soonest = accounts
-      .filter((item) => vertexApiKeyOf(item) && Number(item.disabled_until || 0) > now)
-      .sort((a, b) => Number(a.disabled_until || 0) - Number(b.disabled_until || 0))[0];
-    const until = soonest?.disabled_until ? formatIst(soonest.disabled_until) : "later";
-    throw new AuthRequiredError(`All Vertex keys are rate-limited until ${until}. Add another Express Mode key.`);
+    throw new AuthRequiredError("All Vertex keys are disabled. Enable one in the dashboard.");
   }
 
   async readyBundle({ exclude = [] } = {}) {
@@ -286,23 +281,17 @@ export class VertexClient {
   }
 
   markFailed(bundle, err) {
-    // A network blip or 5xx on the only usable key must not lock it out: with nobody to fail over to,
-    // the cooldown would turn one transient error into 30s of "all keys are rate-limited".
-    const status = Number(err?.status || 0);
-    const transient = !isQuotaError(err) && status !== 401 && status !== 403 && err?.name !== "OAuthError" && err?.name !== "ProjectError";
-    const hasOther = this.accounts().some(
-      (item) => vertexApiKeyOf(item) && !isAccountDisabled(item) && accountIdOf(item) !== accountIdOf(bundle),
-    );
-    if (transient && !hasOther) return null;
     const reason = String(err?.code || err?.message || "upstream").slice(0, 180);
-    const until = cooldownUntil(err);
-    const nextState = until > Date.now()
-      ? disableAccount(bundle, { until, reason })
-      : createVertexBundle({ ...hydrateVertexBundle(bundle), disabled_until: 0, disabled_reason: isQuotaError(err) ? reason : bundle.disabled_reason });
-    this.store.save(createVertexBundle(nextState), { activate: false });
-    const disabled = nextState;
+    const failedId = accountIdOf(bundle);
+    // Remember why this key failed for the dashboard, but never lock an enabled key
+    // out of the pool. The next enabled key is used automatically.
+    this.store.save(createVertexBundle({
+      ...hydrateVertexBundle(bundle),
+      disabled_until: 0,
+      disabled_reason: reason,
+    }), { activate: false });
     const next = this.accounts()
-      .filter((item) => vertexApiKeyOf(item) && !isAccountDisabled(item) && accountIdOf(item) !== accountIdOf(disabled))
+      .filter((item) => vertexApiKeyOf(item) && !isManuallyDisabled(item) && accountIdOf(item) !== failedId)
       .sort((a, b) => (a.last_used || 0) - (b.last_used || 0))[0];
     if (next) {
       this.store.use(accountIdOf(next));
@@ -318,7 +307,14 @@ export class VertexClient {
   raiseUpstream(response) {
     let message = response.body || "";
     let code;
-    const payload = response.parsed;
+    let payload = response.parsed;
+    if (payload === undefined && response.body) {
+      try {
+        payload = JSON.parse(response.body);
+      } catch {
+        payload = undefined;
+      }
+    }
     if (payload && typeof payload === "object") {
       if (payload.error && typeof payload.error === "object") {
         message = String(payload.error.message || message);
@@ -590,44 +586,40 @@ export class VertexClient {
 
   async chatCompletions(body) {
     const resolved = await this.resolveRequestModel(body);
-    const bundle = this.requireBundle();
     const payload = await this.generate(openaiToVertex(body, resolved));
     const out = geminiToOpenai(payload, resolved.model);
-    this.recordUsage(this.store.load() || bundle, { ok: true, prompt: out.usage?.prompt_tokens, completion: out.usage?.completion_tokens });
+    this.recordUsage(this.store.load(), { ok: true, prompt: out.usage?.prompt_tokens, completion: out.usage?.completion_tokens });
     return out;
   }
 
   async *chatCompletionsStream(body) {
     const resolved = await this.resolveRequestModel(body);
     const acc = new StreamAccumulator(resolved.model);
-    const bundle = this.requireBundle();
     for await (const event of this.stream(openaiToVertex(body, resolved))) {
       for (const chunk of acc.ingest(event)) yield `data: ${JSON.stringify(chunk)}\n\n`;
     }
     for (const chunk of acc.finish()) yield `data: ${JSON.stringify(chunk)}\n\n`;
-    this.recordUsage(this.store.load() || bundle, { ok: true, prompt: acc.usage?.prompt_tokens, completion: acc.usage?.completion_tokens });
+    this.recordUsage(this.store.load(), { ok: true, prompt: acc.usage?.prompt_tokens, completion: acc.usage?.completion_tokens });
     yield "data: [DONE]\n\n";
   }
 
   async messages(body) {
     const resolved = await this.resolveRequestModel(body);
-    const bundle = this.requireBundle();
     const payload = await this.generate(anthropicToVertex(body, resolved));
     const out = geminiToAnthropic(payload, resolved.model);
-    this.recordUsage(this.store.load() || bundle, { ok: true, prompt: out.usage?.input_tokens, completion: out.usage?.output_tokens });
+    this.recordUsage(this.store.load(), { ok: true, prompt: out.usage?.input_tokens, completion: out.usage?.output_tokens });
     return out;
   }
 
   async *messagesStream(body) {
     const resolved = await this.resolveRequestModel(body);
-    const bundle = this.requireBundle();
     const wrapped = anthropicToVertex(body, resolved);
     const acc = yield* streamAnthropicMessages({
       open: () => this.stream(wrapped),
       makeAccumulator: () => new AnthropicStreamAccumulator(resolved.model),
       log: (msg) => console.warn(`[vertex] ${resolved.model}: ${msg}`),
     });
-    this.recordUsage(this.store.load() || bundle, { ok: true, prompt: acc.usage?.input_tokens, completion: acc.usage?.output_tokens });
+    this.recordUsage(this.store.load(), { ok: true, prompt: acc.usage?.input_tokens, completion: acc.usage?.output_tokens });
   }
 
   async responses(body) {

@@ -345,10 +345,115 @@ test("vertex quota on one key fails over to the next", async () => {
     assert.equal(out.choices[0].message.content, "from-second");
     assert.equal(vertex.activeAccount().email, "cpt.brb.jfq");
     const limited = vertex.findAccount("cpt");
+    assert.equal(limited.enabled, true);
     assert.ok(!Number(limited.disabled_until) || Number(limited.disabled_until) <= Date.now());
     assert.match(String(limited.disabled_reason || ""), /RESOURCE_EXHAUSTED/i);
     assert.deepEqual(keys, ["AQ.first", "AQ.second"]);
+
+    // Next request stays on the working enabled key. No dashboard Use click.
+    const second = await vertex.chatCompletions({
+      model: "vertex/gemini-3.8-flash",
+      messages: [{ role: "user", content: "again" }],
+    });
+    assert.equal(second.choices[0].message.content, "from-second");
+    assert.equal(vertex.activeAccount().email, "cpt.brb.jfq");
+    assert.deepEqual(keys, ["AQ.first", "AQ.second", "AQ.second"]);
   } finally {
     await up.close();
   }
 });
+
+test("vertex uses any other enabled key without needing dashboard Use", async () => {
+  const dir = tempDir();
+  const seen = [];
+  const up = await mockServer(({ req, url, res }) => {
+    seen.push({ key: req.headers["x-goog-api-key"], path: url.pathname });
+    if (req.headers["x-goog-api-key"] === "AQ.parked") {
+      sendJson(res, 429, {
+        error: { message: "Resource exhausted.", status: "RESOURCE_EXHAUSTED" },
+      });
+      return;
+    }
+    sendJson(res, 200, {
+      candidates: [{ content: { parts: [{ text: "enabled-key" }] }, finishReason: "STOP" }],
+    });
+  });
+  const tokenPath = path.join(dir, "vertex-tokens.db");
+  const store = new TokenStore(tokenPath);
+  store.save(createVertexBundle({
+    api_key: "AQ.parked",
+    label: "cpt",
+    email: "cpt",
+    project_id: "project-one",
+    disabled_until: Date.now() + 3_600_000,
+    disabled_reason: "RESOURCE_EXHAUSTED",
+  }));
+  store.save(createVertexBundle({
+    api_key: "AQ.ready",
+    label: "cpt.brb.jfq",
+    email: "cpt.brb.jfq",
+    project_id: "project-two",
+  }));
+  store.use("cpt");
+  const vertex = new VertexClient(testSettings(dir, {
+    vertexTokenPath: tokenPath,
+    vertexBaseUrl: up.url,
+    liveModels: false,
+  }));
+  try {
+    const out = await vertex.chatCompletions({
+      model: "vertex/gemini-4-argon",
+      messages: [{ role: "user", content: "hi" }],
+    });
+    assert.equal(out.choices[0].message.content, "enabled-key");
+    assert.equal(vertex.activeAccount().email, "cpt.brb.jfq");
+    assert.ok(seen.some((hit) => hit.key === "AQ.ready"));
+    assert.deepEqual(seen.map((hit) => hit.key), ["AQ.parked", "AQ.ready"]);
+  } finally {
+    await up.close();
+  }
+});
+
+test("vertex skips a manually disabled key and never reports all-keys-limited when another is enabled", async () => {
+  const dir = tempDir();
+  const seen = [];
+  const up = await mockServer(({ req, res }) => {
+    seen.push(req.headers["x-goog-api-key"]);
+    sendJson(res, 200, {
+      candidates: [{ content: { parts: [{ text: "other" }] }, finishReason: "STOP" }],
+    });
+  });
+  const tokenPath = path.join(dir, "vertex-tokens.db");
+  const store = new TokenStore(tokenPath);
+  store.save(createVertexBundle({
+    api_key: "AQ.off",
+    label: "off",
+    email: "off",
+    project_id: "project-off",
+    enabled: false,
+  }));
+  store.save(createVertexBundle({
+    api_key: "AQ.on",
+    label: "on",
+    email: "on",
+    project_id: "project-on",
+  }));
+  store.use("off");
+  const vertex = new VertexClient(testSettings(dir, {
+    vertexTokenPath: tokenPath,
+    vertexBaseUrl: up.url,
+    liveModels: false,
+  }));
+  try {
+    const out = await vertex.chatCompletions({
+      model: "vertex/gemini-3.8-flash",
+      messages: [{ role: "user", content: "hi" }],
+    });
+    assert.equal(out.choices[0].message.content, "other");
+    assert.equal(vertex.activeAccount().email, "on");
+    assert.deepEqual(seen, ["AQ.on"]);
+  } finally {
+    await up.close();
+  }
+});
+
