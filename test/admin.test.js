@@ -71,6 +71,54 @@ test("enable disable and batch skip disabled accounts", async () => {
   }
 });
 
+test("deleting an account keeps its tokens in dashboard totals", async () => {
+  const dir = tempDir();
+  const tokenPath = path.join(dir, "tokens.db");
+  const store = new TokenStore(tokenPath);
+  store.save(createBundle({
+    access_token: "a1",
+    refresh_token: "r1",
+    expires_at: 4_000_000_000,
+    email: "gone@example.com",
+    project_id: "p1",
+    managed_project_id: "p1",
+    request_count: 2,
+    success_count: 2,
+    prompt_tokens: 2_000_000,
+    completion_tokens: 500_000,
+  }));
+  store.save(createBundle({
+    access_token: "a2",
+    refresh_token: "r2",
+    expires_at: 4_000_000_000,
+    email: "kept@example.com",
+    project_id: "p2",
+    managed_project_id: "p2",
+    request_count: 1,
+    success_count: 1,
+    prompt_tokens: 100,
+    completion_tokens: 20,
+  }));
+  const client = new AntigravityClient(testSettings(dir, { tokenPath, liveModels: false }));
+  const api = await startApi(dir, { client });
+  try {
+    const before = await request(api.url, "/admin/api/status");
+    assert.equal(before.json.stats.prompt_tokens, 2_000_100);
+    assert.equal(before.json.stats.completion_tokens, 500_020);
+    assert.equal(before.json.stats.requests, 3);
+    const deleted = await request(api.url, "/admin/api/accounts/gone@example.com", { method: "DELETE" });
+    assert.equal(deleted.status, 200);
+    const after = await request(api.url, "/admin/api/status");
+    assert.equal(after.json.items.length, 1);
+    assert.equal(after.json.stats.prompt_tokens, 2_000_100);
+    assert.equal(after.json.stats.completion_tokens, 500_020);
+    assert.equal(after.json.stats.requests, 3);
+    assert.equal(after.json.stats.success, 3);
+  } finally {
+    await api.close();
+  }
+});
+
 test("dashboard lists chatgpt accounts and starts chatgpt login", async () => {
   const dir = tempDir();
   const tokenPath = path.join(dir, "chatgpt-tokens.db");

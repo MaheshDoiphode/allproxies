@@ -93,6 +93,54 @@ export function touchAccountStats(bundle, { ok = true, prompt = 0, completion = 
   });
 }
 
+const EMPTY_USAGE = { requests: 0, success: 0, failed: 0, prompt_tokens: 0, completion_tokens: 0 };
+
+export function emptyUsageStats() {
+  return { ...EMPTY_USAGE };
+}
+
+export function parseUsageStats(raw) {
+  if (!raw) return emptyUsageStats();
+  let parsed = raw;
+  if (typeof raw === "string") {
+    try {
+      parsed = JSON.parse(raw);
+    } catch {
+      return emptyUsageStats();
+    }
+  }
+  if (!parsed || typeof parsed !== "object") return emptyUsageStats();
+  return {
+    requests: Number(parsed.requests || 0),
+    success: Number(parsed.success || 0),
+    failed: Number(parsed.failed || parsed.error_count || 0),
+    prompt_tokens: Number(parsed.prompt_tokens || 0),
+    completion_tokens: Number(parsed.completion_tokens || 0),
+  };
+}
+
+export function addUsageStats(base, extra = {}) {
+  const current = parseUsageStats(base);
+  return {
+    requests: current.requests + Number(extra.requests || extra.request_count || 0),
+    success: current.success + Number(extra.success || extra.success_count || 0),
+    failed: current.failed + Number(extra.failed || extra.error_count || 0),
+    prompt_tokens: current.prompt_tokens + Number(extra.prompt_tokens || extra.prompt || 0),
+    completion_tokens: current.completion_tokens + Number(extra.completion_tokens || extra.completion || 0),
+  };
+}
+
+export function usageFromBundle(bundle) {
+  if (!bundle) return emptyUsageStats();
+  return {
+    requests: Number(bundle.request_count || 0),
+    success: Number(bundle.success_count || 0),
+    failed: Number(bundle.error_count || 0),
+    prompt_tokens: Number(bundle.prompt_tokens || 0),
+    completion_tokens: Number(bundle.completion_tokens || 0),
+  };
+}
+
 export function disableAccount(bundle, { until, reason, now = Date.now() } = {}) {
   const untilMs = parseResetMs(until, now) || now + 3_600_000;
   return createBundle({
@@ -270,6 +318,20 @@ export class TokenStore {
     this.db.prepare("INSERT INTO meta(key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value").run(key, value == null ? "" : String(value));
   }
 
+  lifetimeStats() {
+    return parseUsageStats(this.getMeta("lifetime_stats"));
+  }
+
+  addLifetimeStats(extra = {}) {
+    const next = addUsageStats(this.lifetimeStats(), extra);
+    this.setMeta("lifetime_stats", JSON.stringify(next));
+    return next;
+  }
+
+  rememberRemovedUsage(bundle) {
+    return this.addLifetimeStats(usageFromBundle(bundle));
+  }
+
   list() {
     return this.db.prepare("SELECT * FROM accounts ORDER BY email COLLATE NOCASE, id").all().map(rowToBundle);
   }
@@ -398,6 +460,7 @@ export class TokenStore {
     const wanted = String(id || "").trim().toLowerCase();
     const row = this.db.prepare("SELECT * FROM accounts WHERE id = ? OR lower(email) = ?").get(wanted, wanted);
     if (!row) return false;
+    this.rememberRemovedUsage(rowToBundle(row));
     this.db.prepare("DELETE FROM accounts WHERE id = ?").run(row.id);
     if (this.getMeta("active") === row.id) {
       const next = this.db.prepare("SELECT id FROM accounts ORDER BY email COLLATE NOCASE, id LIMIT 1").get();
@@ -407,6 +470,7 @@ export class TokenStore {
   }
 
   clear() {
+    for (const bundle of this.list()) this.rememberRemovedUsage(bundle);
     this.db.exec("DELETE FROM accounts");
     this.setMeta("active", "");
   }

@@ -33,6 +33,7 @@ import {
   projectOf,
   setAccountEnabled,
   touchAccountStats,
+  addUsageStats,
 } from "./tokens.js";
 import {
   ChatgptResponsesStreamAccumulator,
@@ -111,6 +112,16 @@ export class ChatgptClient {
     this.quotaCache = new Map();
     this.quotaTtlMs = 30_000;
     this.stats = { requests: 0, success: 0, failed: 0, prompt_tokens: 0, completion_tokens: 0 };
+  }
+
+  usageStats() {
+    return this.accounts().reduce((sum, bundle) => addUsageStats(sum, {
+      requests: bundle.request_count,
+      success: bundle.success_count,
+      failed: bundle.error_count,
+      prompt_tokens: bundle.prompt_tokens,
+      completion_tokens: bundle.completion_tokens,
+    }), this.store.lifetimeStats());
   }
 
   catalogReason() {

@@ -27,6 +27,7 @@ import {
   isRetryableUpstreamError,
   setAccountEnabled,
   touchAccountStats,
+  addUsageStats,
   vertexApiKeyOf,
   vertexLocationOf,
   vertexProjectOf,
@@ -73,6 +74,16 @@ export class VertexClient {
     this.modelsTtlMs = 60_000;
     this.catalog = { at: 0, error: null, listed: this.modelsCache.models.length, source: "express" };
     this.stats = { requests: 0, success: 0, failed: 0, prompt_tokens: 0, completion_tokens: 0 };
+  }
+
+  usageStats() {
+    return this.accounts().reduce((sum, bundle) => addUsageStats(sum, {
+      requests: bundle.request_count,
+      success: bundle.success_count,
+      failed: bundle.error_count,
+      prompt_tokens: bundle.prompt_tokens,
+      completion_tokens: bundle.completion_tokens,
+    }), this.store.lifetimeStats());
   }
 
   catalogStatus() {

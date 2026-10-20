@@ -58,6 +58,23 @@
     return 0;
   }
 
+  function compactCount(value) {
+    const n = Number(value || 0);
+    if (!Number.isFinite(n) || n === 0) return "0";
+    const abs = Math.abs(n);
+    const sign = n < 0 ? "-" : "";
+    const format = (div, suffix) => {
+      const scaled = abs / div;
+      const digits = scaled >= 100 ? 0 : scaled >= 10 ? 1 : 2;
+      return sign + scaled.toFixed(digits).replace(/\.0+$/, "").replace(/(\.\d*[1-9])0+$/, "$1") + suffix;
+    };
+    if (abs >= 1e12) return format(1e12, "T");
+    if (abs >= 1e9) return format(1e9, "B");
+    if (abs >= 1e6) return format(1e6, "M");
+    if (abs >= 1e3) return format(1e3, "k");
+    return String(Math.round(n));
+  }
+
   function fmtReset(iso) {
     if (!iso) return "";
     const t = Date.parse(iso);
@@ -139,7 +156,8 @@
             ${a.active ? '<span class="badge ok">last used</span>' : ""}
             ${statusBadge(a)}
             ${accountProvider(a) === "chatgpt" ? `<span class="badge">${escapeHtml(a.plan || "chatgpt")}</span>` : projectBadge(a)}
-            <span class="badge">${a.request_count || 0} req</span>
+            <span class="badge">${compactCount(a.request_count)} req</span>
+            <span class="badge">${compactCount((a.prompt_tokens || 0) + (a.completion_tokens || 0))} tok</span>
           </div>
         </div>
         <div class="account-actions">
@@ -214,12 +232,12 @@
     $("statAccounts").textContent = items.length;
     $("statAvailable").textContent = `${available} available`;
     const stats = status.stats || {};
-    $("statRequests").textContent = stats.requests || 0;
-    $("statTokens").textContent = `${(stats.prompt_tokens || 0) + (stats.completion_tokens || 0)} tokens`;
-    $("statSuccess").textContent = stats.success || 0;
+    $("statRequests").textContent = compactCount(stats.requests);
+    $("statTokens").textContent = `${compactCount((stats.prompt_tokens || 0) + (stats.completion_tokens || 0))} tokens`;
+    $("statSuccess").textContent = compactCount(stats.success);
     const total = stats.requests || 0;
     $("statSuccessRate").textContent = total ? Math.round(((stats.success || 0) / total) * 100) + "%" : "0%";
-    $("statFailed").textContent = stats.failed || 0;
+    $("statFailed").textContent = compactCount(stats.failed);
     $("statActive").textContent = status.active?.email ? `last used ${status.active.email}` : "no accounts in use";
   }
 

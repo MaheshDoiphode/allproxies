@@ -82,6 +82,51 @@ test("legacy single-account file migrates and holds two accounts", () => {
   fs.rmSync(dir, { recursive: true, force: true });
 });
 
+test("removing an account keeps its usage in lifetime stats", () => {
+  const dir = tempDir();
+  const filePath = path.join(dir, "tokens.db");
+  const store = new TokenStore(filePath);
+  store.save(createBundle({
+    access_token: "a1",
+    refresh_token: "r1",
+    expires_at: 99,
+    email: "gone@example.com",
+    request_count: 4,
+    success_count: 3,
+    error_count: 1,
+    prompt_tokens: 1_500_000,
+    completion_tokens: 250_000,
+  }));
+  store.save(createBundle({
+    access_token: "a2",
+    refresh_token: "r2",
+    expires_at: 100,
+    email: "kept@example.com",
+    request_count: 1,
+    success_count: 1,
+    prompt_tokens: 10,
+    completion_tokens: 5,
+  }));
+  store.remove("gone@example.com");
+  assert.deepEqual(store.lifetimeStats(), {
+    requests: 4,
+    success: 3,
+    failed: 1,
+    prompt_tokens: 1_500_000,
+    completion_tokens: 250_000,
+  });
+  store.remove("kept@example.com");
+  assert.deepEqual(store.lifetimeStats(), {
+    requests: 5,
+    success: 4,
+    failed: 1,
+    prompt_tokens: 1_500_010,
+    completion_tokens: 250_005,
+  });
+  store.close();
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
 test("email arriving later remaps rt- id to one row", () => {
   const dir = tempDir();
   const filePath = path.join(dir, "tokens.db");

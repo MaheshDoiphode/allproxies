@@ -12,6 +12,7 @@ import {
   isRetryableUpstreamError,
   cooldownUntil,
   projectOf,
+  addUsageStats,
 } from "../antigravity/tokens.js";
 
 export {
@@ -27,6 +28,7 @@ export {
   isRetryableUpstreamError,
   cooldownUntil,
   projectOf,
+  addUsageStats,
 };
 
 function unpackScope(scope) {

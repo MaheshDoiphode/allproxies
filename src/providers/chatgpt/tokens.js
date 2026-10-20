@@ -1,4 +1,4 @@
-import { TokenStore, createBundle, accountIdOf, isAccountDisabled, isExpired, disableAccount, enableAccount, setAccountEnabled, touchAccountStats, isQuotaError, isRetryableUpstreamError, cooldownUntil, projectOf } from "../antigravity/tokens.js";
+import { TokenStore, createBundle, accountIdOf, isAccountDisabled, isExpired, disableAccount, enableAccount, setAccountEnabled, touchAccountStats, isQuotaError, isRetryableUpstreamError, cooldownUntil, projectOf, addUsageStats } from "../antigravity/tokens.js";
 
 export {
   TokenStore,
@@ -13,6 +13,7 @@ export {
   isRetryableUpstreamError,
   cooldownUntil,
   projectOf,
+  addUsageStats,
 };
 
 function unpackScope(scope) {

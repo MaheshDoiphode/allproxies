@@ -101,13 +101,14 @@ export function createAdmin({ settings, client, chatgpt = null, vertex = null })
       const vx = vertex ? await vertex.listAccountViews({ refresh }) : [];
       const accounts = mergeAccountViews(antigravity, gpt, vx);
       const usable = accounts.filter((item) => item && !item.disabled);
-      const stats = {
-        requests: Number(client.stats?.requests || 0) + Number(chatgpt?.stats?.requests || 0) + Number(vertex?.stats?.requests || 0),
-        success: Number(client.stats?.success || 0) + Number(chatgpt?.stats?.success || 0) + Number(vertex?.stats?.success || 0),
-        failed: Number(client.stats?.failed || 0) + Number(chatgpt?.stats?.failed || 0) + Number(vertex?.stats?.failed || 0),
-        prompt_tokens: Number(client.stats?.prompt_tokens || 0) + Number(chatgpt?.stats?.prompt_tokens || 0) + Number(vertex?.stats?.prompt_tokens || 0),
-        completion_tokens: Number(client.stats?.completion_tokens || 0) + Number(chatgpt?.stats?.completion_tokens || 0) + Number(vertex?.stats?.completion_tokens || 0),
-      };
+      const parts = [client, chatgpt, vertex].filter(Boolean).map((item) => item.usageStats?.() || item.stats || {});
+      const stats = parts.reduce((sum, part) => ({
+        requests: Number(sum.requests || 0) + Number(part.requests || 0),
+        success: Number(sum.success || 0) + Number(part.success || 0),
+        failed: Number(sum.failed || 0) + Number(part.failed || 0),
+        prompt_tokens: Number(sum.prompt_tokens || 0) + Number(part.prompt_tokens || 0),
+        completion_tokens: Number(sum.completion_tokens || 0) + Number(part.completion_tokens || 0),
+      }), { requests: 0, success: 0, failed: 0, prompt_tokens: 0, completion_tokens: 0 });
       sendJson(res, 200, {
         version: VERSION,
         provider: "antigravity",
