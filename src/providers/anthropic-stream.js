@@ -96,13 +96,14 @@ export function isTransientStreamError(err) {
 export async function* streamAnthropicMessages({ open, makeAccumulator, maxAttempts = 3, backoffMs = 400, holdThoughtsMs = 3_000, log }) {
   let acc;
   let held = [];
+  let lastFinish = null;
   for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
     acc = makeAccumulator();
     held = [];
     let opened = false;
     const startedAt = Date.now();
     try {
-      for await (const event of withIdlePings(open())) {
+      for await (const event of withIdlePings(open({ attempt, lastFinish }))) {
         if (event?.__ping) {
           yield formatSse("ping", { type: "ping" });
           continue;
@@ -136,6 +137,7 @@ export async function* streamAnthropicMessages({ open, makeAccumulator, maxAttem
       throw err;
     }
     if (opened) break;
+    lastFinish = acc.upstreamFinish || null;
     if (attempt < maxAttempts) {
       log?.(`attempt ${attempt}/${maxAttempts} produced no output (upstream finishReason: ${acc.upstreamFinish || "none"}); retrying`);
       continue;

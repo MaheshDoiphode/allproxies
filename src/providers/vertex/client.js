@@ -40,6 +40,7 @@ import {
   geminiToOpenai,
   openaiToResponses,
   openaiToVertex,
+  recoverMalformedVertexRequest,
   responsesAssistantMessage,
   responsesToChatBody,
   unwrapResponse,
@@ -687,6 +688,7 @@ export class VertexClient {
     let promptTokens = 0;
     let cachedTokens = 0;
     let outputTokens = 0;
+    let finishReason = "";
     try {
       for await (const event of iterateSse(response.stream, {
         onFirstBytes: () => {
@@ -696,18 +698,21 @@ export class VertexClient {
         },
       })) {
         chunks += 1;
-        const meta = event?.usageMetadata || event?.response?.usageMetadata;
+        const inner = event?.response || event;
+        const meta = inner?.usageMetadata;
         if (meta) {
           if (meta.promptTokenCount) promptTokens = meta.promptTokenCount;
           if (meta.cachedContentTokenCount) cachedTokens = meta.cachedContentTokenCount;
           if (meta.candidatesTokenCount) outputTokens = meta.candidatesTokenCount;
         }
+        const candFinish = inner?.candidates?.[0]?.finishReason;
+        if (candFinish) finishReason = candFinish;
         yield event;
       }
     } finally {
       if (this.settings.debugRequests) {
         const hitPct = promptTokens > 0 ? Math.round((cachedTokens / promptTokens) * 100) : 0;
-        console.log(`[vertex] stream ${wrapped.model} key=${usedKey} done=${Date.now() - t0}ms events=${chunks} prompt=${promptTokens} cached=${cachedTokens}(${hitPct}%) out=${outputTokens}`);
+        console.log(`[vertex] stream ${wrapped.model} key=${usedKey} done=${Date.now() - t0}ms events=${chunks} finish=${finishReason || "OK"} prompt=${promptTokens} cached=${cachedTokens}(${hitPct}%) out=${outputTokens}`);
       }
       response.releaseSlot?.();
       response.stream?.resume();
@@ -749,7 +754,12 @@ export class VertexClient {
     const wrapped = anthropicToVertex(body, resolved);
     let usedBundle = null;
     const acc = yield* streamAnthropicMessages({
-      open: () => this.stream(wrapped, { onBundle: (b) => { usedBundle = b; } }),
+      open: ({ attempt = 1, lastFinish = null } = {}) =>
+        this.stream(recoverMalformedVertexRequest(wrapped, { attempt, lastFinish }), {
+          onBundle: (b) => {
+            usedBundle = b;
+          },
+        }),
       makeAccumulator: () => new AnthropicStreamAccumulator(resolved.model),
       log: (msg) => console.warn(`[vertex] ${resolved.model}: ${msg}`),
     });

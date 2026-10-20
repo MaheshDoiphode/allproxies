@@ -5,6 +5,7 @@ import {
   mediaPartFromUrl,
   openaiContentToVertexParts,
   openaiToVertex,
+  recoverMalformedVertexRequest,
   vertexHttpBody,
   vertexThinkingFromRequest,
 } from "../src/providers/vertex/translate.js";
@@ -211,5 +212,28 @@ test("long multimodal chats preserve all inline images and produce a stable sess
   assert.ok(contents[0].parts.some((p) => p.inlineData));
   assert.ok(contents[contents.length - 1].parts.some((p) => p.inlineData));
 });
+
+test("vertex tool requests set VALIDATED functionCallingConfig and recover on MALFORMED_RESPONSE retry", () => {
+  const wrapped = anthropicToVertex(
+    {
+      model: "vertex/gemini-4-argon",
+      max_tokens: 1024,
+      tools: [{ name: "edit_file", description: "edit", input_schema: { type: "object", properties: { path: { type: "string" } } } }],
+      messages: [{ role: "user", content: "update the compare table" }],
+    },
+    { model: "gemini-4-argon", effort: "high" },
+  );
+  assert.deepEqual(wrapped.request.toolConfig, {
+    functionCallingConfig: { mode: "VALIDATED" },
+  });
+  const retry2 = recoverMalformedVertexRequest(wrapped, { attempt: 2, lastFinish: "MALFORMED_RESPONSE" });
+  assert.equal(retry2.request.generationConfig.temperature, 0.4);
+  assert.deepEqual(retry2.request.toolConfig, {
+    functionCallingConfig: { mode: "AUTO" },
+  });
+  const lastParts = retry2.request.contents.at(-1).parts;
+  assert.ok(lastParts.some((p) => typeof p.text === "string" && p.text.includes("emit valid JSON arguments")));
+});
+
 
 

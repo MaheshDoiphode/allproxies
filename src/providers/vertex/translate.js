@@ -381,14 +381,61 @@ export function sessionKeyFromRequest(request = {}) {
   return crypto.createHash("sha1").update(`${sysText}\0${firstText}`).digest("hex").slice(0, 16);
 }
 
-export function wrapVertexGenerate({ model, contents, system, generation, tools }) {
+export function wrapVertexGenerate({ model, contents, system, generation, tools, toolConfig }) {
   const rewritten = rewriteGeminiMedia(contents);
   const safeContents = pruneContentsIfTooLarge(rewritten);
   const request = { contents: safeContents };
   if (system) request.systemInstruction = system;
   if (generation && Object.keys(generation).length) request.generationConfig = generation;
-  if (tools) request.tools = tools;
+  if (tools) {
+    request.tools = tools;
+    // Per Google's Vertex AI FunctionCallingConfig spec (libs/js-genai/src/types.ts),
+    // mode: "VALIDATED" constrains the model to schema-valid function calls or natural language,
+    // preventing MALFORMED_RESPONSE / MALFORMED_FUNCTION_CALL on large contexts with 70+ tools.
+    request.toolConfig = toolConfig || { functionCallingConfig: { mode: "VALIDATED" } };
+  } else if (toolConfig) {
+    request.toolConfig = toolConfig;
+  }
   return { model, sessionKey: sessionKeyFromRequest(request), request };
+}
+
+export function recoverMalformedVertexRequest(wrapped, { attempt = 2, lastFinish = "" } = {}) {
+  if (!wrapped || attempt <= 1) return wrapped;
+  const req = wrapped.request || {};
+  const nextReq = { ...req };
+  const gen = { ...(req.generationConfig || {}) };
+  // Vary temperature slightly so the sampler does not deterministically hit the exact same
+  // malformed token sequence in the cached KV state.
+  gen.temperature = attempt === 2 ? 0.4 : 0.7;
+  if (gen.thinkingConfig && typeof gen.thinkingConfig === "object") {
+    const tc = { ...gen.thinkingConfig };
+    if (attempt >= 3 && tc.thinkingLevel === "HIGH") {
+      tc.thinkingLevel = "MEDIUM";
+    }
+    gen.thinkingConfig = tc;
+  }
+  nextReq.generationConfig = gen;
+  if (req.tools) {
+    // Switch between AUTO and VALIDATED and nudge the final turn so the model emits a clean call.
+    nextReq.toolConfig = {
+      functionCallingConfig: { mode: attempt % 2 === 0 ? "AUTO" : "VALIDATED" },
+    };
+  }
+  if (/MALFORMED/i.test(String(lastFinish || "")) && Array.isArray(req.contents) && req.contents.length) {
+    const contents = req.contents.map((turn, idx) => {
+      if (idx !== req.contents.length - 1 || turn?.role !== "user" || !Array.isArray(turn.parts)) return turn;
+      if (turn.parts.some((p) => p?.functionResponse)) return turn;
+      return {
+        ...turn,
+        parts: [
+          ...turn.parts,
+          { text: "\n(Important: emit valid JSON arguments for any tool call, or reply with concise text before calling tools.)" },
+        ],
+      };
+    });
+    nextReq.contents = contents;
+  }
+  return { ...wrapped, request: nextReq };
 }
 
 export function openaiToVertex(body, { model, effort } = {}) {

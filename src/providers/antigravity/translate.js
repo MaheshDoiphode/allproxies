@@ -440,7 +440,13 @@ export function wrapGenerate({ model, project, contents, system, generation, too
   const request = { contents: safeContents };
   if (system) request.systemInstruction = system;
   if (generation) request.generationConfig = generation;
-  if (tools) request.tools = sanitizeTools(tools, { jsonSchema: String(model).toLowerCase().includes("claude") });
+  const isClaude = String(model).toLowerCase().includes("claude");
+  if (tools) {
+    request.tools = sanitizeTools(tools, { jsonSchema: isClaude });
+    if (!isClaude) {
+      request.toolConfig = { functionCallingConfig: { mode: "VALIDATED" } };
+    }
+  }
   if (sessionId) request.sessionId = sessionId;
   return {
     project,
@@ -450,6 +456,42 @@ export function wrapGenerate({ model, project, contents, system, generation, too
     requestId: newRequestId(model),
     request,
   };
+}
+
+export function recoverMalformedRequest(wrapped, { attempt = 2, lastFinish = "" } = {}) {
+  if (!wrapped || attempt <= 1) return wrapped;
+  const req = wrapped.request || {};
+  const nextReq = { ...req };
+  const gen = { ...(req.generationConfig || {}) };
+  gen.temperature = attempt === 2 ? 0.4 : 0.7;
+  if (gen.thinkingConfig && typeof gen.thinkingConfig === "object") {
+    const tc = { ...gen.thinkingConfig };
+    if (attempt >= 3 && tc.thinkingLevel && String(tc.thinkingLevel).toLowerCase() === "high") {
+      tc.thinkingLevel = "medium";
+    }
+    gen.thinkingConfig = tc;
+  }
+  nextReq.generationConfig = gen;
+  if (req.tools && !String(wrapped.model).toLowerCase().includes("claude")) {
+    nextReq.toolConfig = {
+      functionCallingConfig: { mode: attempt % 2 === 0 ? "AUTO" : "VALIDATED" },
+    };
+  }
+  if (/MALFORMED/i.test(String(lastFinish || "")) && Array.isArray(req.contents) && req.contents.length) {
+    const contents = req.contents.map((turn, idx) => {
+      if (idx !== req.contents.length - 1 || turn?.role !== "user" || !Array.isArray(turn.parts)) return turn;
+      if (turn.parts.some((p) => p?.functionResponse)) return turn;
+      return {
+        ...turn,
+        parts: [
+          ...turn.parts,
+          { text: "\n(Important: emit valid JSON arguments for any tool call, or reply with concise text before calling tools.)" },
+        ],
+      };
+    });
+    nextReq.contents = contents;
+  }
+  return { ...wrapped, requestId: newRequestId(wrapped.model), request: nextReq };
 }
 
 export function openaiToUpstream(body, { model, project, effort } = {}) {

@@ -51,6 +51,7 @@ import {
   geminiToOpenai,
   openaiToResponses,
   openaiToUpstream,
+  recoverMalformedRequest,
   responsesAssistantMessage,
   responsesToChatBody,
   unwrapResponse,
@@ -762,8 +763,10 @@ export class AntigravityClient {
   async *messagesStream(body) {
     const resolved = await this.resolveRequestModel(body);
     const bundle = await this.readyBundle();
+    const wrapped = anthropicToUpstream(body, resolved);
     const acc = yield* streamAnthropicMessages({
-      open: () => this.stream(anthropicToUpstream(body, resolved)),
+      open: ({ attempt = 1, lastFinish = null } = {}) =>
+        this.stream(recoverMalformedRequest(wrapped, { attempt, lastFinish })),
       makeAccumulator: () => new AnthropicStreamAccumulator(resolved.model),
       log: (msg) => console.warn(`[antigravity] ${resolved.model}: ${msg}`),
     });
