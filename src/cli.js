@@ -24,7 +24,7 @@ Commands:
   use <email>                Make that saved Antigravity account active
   status                     Show every saved account
   models                     List models (live + static)
-  serve [--host H] [--port N]
+  serve [--host H] [--port N] [--debug]
                               Dashboard: http://HOST:PORT/
 `);
 }
@@ -34,6 +34,7 @@ function parseServe(argv) {
   for (let i = 0; i < argv.length; i += 1) {
     if (argv[i] === "--host") out.host = argv[++i];
     else if (argv[i] === "--port") out.port = Number(argv[++i]);
+    else if (argv[i] === "--debug" || argv[i] === "-d") out.debugRequests = true;
   }
   return out;
 }

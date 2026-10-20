@@ -365,7 +365,7 @@ export class VertexClient {
     });
   }
 
-  async post(url, payload, { stream = false, maxPasses = 2, retryDelayMs = 800 } = {}) {
+  async post(url, payload, { stream = false, maxPasses = 5, retryDelayMs = 1500 } = {}) {
     let lastError;
     let recoveredOnce = false;
     for (let pass = 0; pass < maxPasses; pass += 1) {
@@ -392,6 +392,7 @@ export class VertexClient {
           this.recordUsage(bundle, { ok: false });
           if (isRetryableUpstreamError(err) && this.markFailed(bundle, err)) continue;
           if (isRetryableUpstreamError(err) && pass + 1 < maxPasses) break;
+          err.retriedUpstream = pass > 0 || tried.size > 1;
           throw err;
         }
         if (response.status < 400) {
@@ -430,15 +431,26 @@ export class VertexClient {
               continue;
             }
           }
+          if (this.settings.debugRequests) {
+            console.warn(`[vertex] key=${bundle.email || id} status=${err.status} code=${err.code || ""} msg=${String(err.message || "").slice(0, 140)}`);
+          }
           if (isRetryableUpstreamError(err) && this.markFailed(bundle, err)) continue;
           if (isRetryableUpstreamError(err) && pass + 1 < maxPasses) break;
+          err.retriedUpstream = pass > 0 || tried.size > 1;
           throw err;
         }
       }
       if (!lastError || !isRetryableUpstreamError(lastError) || pass + 1 >= maxPasses) break;
-      const waitMs = Math.min(15_000, Math.max(retryDelayMs * (pass + 1), Number(lastError.retryAfterMs || 0)));
+      // Exponential backoff per Google's js-genai SDK (1.5s, 3s, 6s, 12s, capped at 30s) so a
+      // 60-second Vertex TPM/RPM window resets instead of failing the turn with 429.
+      const expWait = retryDelayMs * (2 ** pass);
+      const waitMs = Math.min(30_000, Math.max(expWait, Number(lastError.retryAfterMs || 0)));
+      if (this.settings.debugRequests) {
+        console.warn(`[vertex] pass ${pass + 1}/${maxPasses} exhausted (${lastError.code || lastError.message}); backing off ${waitMs}ms`);
+      }
       if (waitMs > 0) await new Promise((resolve) => setTimeout(resolve, waitMs));
     }
+    if (lastError) lastError.retriedUpstream = true;
     throw lastError || new AuthRequiredError("Vertex login required. Add an Express Mode API key.");
   }
 

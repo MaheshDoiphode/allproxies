@@ -185,3 +185,32 @@ test("gemini-4-argon maps thinking and routing properly", () => {
   });
 });
 
+test("long multimodal chats strip historical inline images and keep recent turns", () => {
+  const messages = [];
+  for (let i = 0; i < 6; i += 1) {
+    messages.push({
+      role: "user",
+      content: [
+        { type: "text", text: `turn ${i}` },
+        { type: "image", source: { type: "base64", media_type: "image/png", data: "A".repeat(1000) } },
+      ],
+    });
+    if (i < 5) {
+      messages.push({
+        role: "assistant",
+        content: [{ type: "text", text: `reply ${i}` }],
+      });
+    }
+  }
+  const wrapped = anthropicToVertex({ model: "gemini-4-argon", messages }, { model: "gemini-4-argon" });
+  const contents = wrapped.request.contents;
+  assert.equal(contents.length, 11);
+  // Early turns (before the last 4 turns) have their inlineData replaced with a text placeholder
+  assert.ok(!contents[0].parts.some((p) => p.inlineData));
+  assert.ok(contents[0].parts.some((p) => p.text === "[previous image attachment omitted]"));
+  // Recent turns retain their inlineData
+  const recentUserTurn = contents[contents.length - 1];
+  assert.ok(recentUserTurn.parts.some((p) => p.inlineData));
+});
+
+

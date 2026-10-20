@@ -80,7 +80,7 @@ export async function* withIdlePings(source, idleMs = 10_000) {
 const NETWORK_ERROR = /econnreset|econnrefused|etimedout|epipe|socket hang up|network|timed out|terminated|eai_again|und_err|aborted/i;
 
 export function isTransientStreamError(err) {
-  if (!err || err.name === "AuthRequiredError") return false;
+  if (!err || err.name === "AuthRequiredError" || err.retriedUpstream) return false;
   const status = Number(err.status || 0);
   if (status) return status === 500 || status === 502 || status === 503 || status === 504;
   return NETWORK_ERROR.test(`${err.code || ""} ${err.message || ""} ${err.cause?.code || ""} ${err.cause?.message || ""}`);
@@ -111,7 +111,13 @@ export async function* streamAnthropicMessages({ open, makeAccumulator, maxAttem
           if (opened) yield formatSse(item.type, item);
           else held.push(item);
         }
-        if (!opened && (acc.hasVisibleContent || (acc.hasContent && Date.now() - startedAt >= holdThoughtsMs))) {
+        if (
+          !opened &&
+          (acc.hasVisibleContent ||
+            (acc.hasContent &&
+              !acc.upstreamFinish &&
+              (holdThoughtsMs <= 0 || Date.now() - startedAt >= holdThoughtsMs || acc.seenThoughts.length >= 64)))
+        ) {
           opened = true;
           for (const item of held.splice(0)) yield formatSse(item.type, item);
         }
