@@ -51,13 +51,20 @@ export function vertexModelResource(model, { publisher = VERTEX_PUBLISHER, proje
 }
 
 export function withVertexProjectPath(url, { project, location = "global" } = {}) {
-  if (!isVertexProjectId(project)) return url;
   try {
     const parsed = new URL(url);
-    if (/\/projects\//.test(parsed.pathname)) return url;
-    parsed.pathname = parsed.pathname.replace(
+    const stripped = parsed.pathname.replace(
+      /(\/v1(?:beta\d+)?)\/projects\/[^/]+\/locations\/[^/]+\/(publishers\/)/,
+      "$1/$2",
+    );
+    if (!isVertexProjectId(project)) {
+      parsed.pathname = stripped;
+      return parsed.toString();
+    }
+    const loc = String(location || "global").trim() || "global";
+    parsed.pathname = stripped.replace(
       /(\/v1(?:beta\d+)?)\/(publishers\/)/,
-      `$1/projects/${String(project).trim()}/locations/${String(location || "global").trim() || "global"}/$2`,
+      `$1/projects/${String(project).trim()}/locations/${loc}/$2`,
     );
     return parsed.toString();
   } catch {

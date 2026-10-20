@@ -409,6 +409,60 @@ test("vertex uses any other enabled key without needing dashboard Use", async ()
     assert.equal(vertex.activeAccount().email, "cpt.brb.jfq");
     assert.ok(seen.some((hit) => hit.key === "AQ.ready"));
     assert.deepEqual(seen.map((hit) => hit.key), ["AQ.parked", "AQ.ready"]);
+    assert.match(seen[0].path, /\/projects\/project-one\//);
+    assert.match(seen[1].path, /\/projects\/project-two\//);
+  } finally {
+    await up.close();
+  }
+});
+
+test("vertex retries across enabled keys on transient 429 and never claims keys are disabled", async () => {
+  const dir = tempDir();
+  const seen = [];
+  const up = await mockServer(({ req, url, res }) => {
+    seen.push({ key: req.headers["x-goog-api-key"], path: url.pathname });
+    if (seen.length <= 2) {
+      sendJson(
+        res,
+        429,
+        { error: { message: "Resource exhausted.", status: "RESOURCE_EXHAUSTED" } },
+        { "Retry-After": "0" },
+      );
+      return;
+    }
+    sendJson(res, 200, {
+      candidates: [{ content: { parts: [{ text: "recovered-without-retry-button" }] }, finishReason: "STOP" }],
+    });
+  });
+  const tokenPath = path.join(dir, "vertex-tokens.db");
+  const store = new TokenStore(tokenPath);
+  store.save(createVertexBundle({
+    api_key: "AQ.first",
+    label: "cpt",
+    email: "cpt",
+    project_id: "project-one",
+  }));
+  store.save(createVertexBundle({
+    api_key: "AQ.second",
+    label: "cpt.brb.jfq",
+    email: "cpt.brb.jfq",
+    project_id: "project-two",
+  }));
+  store.use("cpt");
+  const vertex = new VertexClient(testSettings(dir, {
+    vertexTokenPath: tokenPath,
+    vertexBaseUrl: up.url,
+    liveModels: false,
+  }));
+  const origPost = vertex.post.bind(vertex);
+  vertex.post = (url, payload, opts = {}) => origPost(url, payload, { ...opts, retryDelayMs: 5 });
+  try {
+    const out = await vertex.chatCompletions({
+      model: "vertex/gemini-4-argon",
+      messages: [{ role: "user", content: "hi" }],
+    });
+    assert.equal(out.choices[0].message.content, "recovered-without-retry-button");
+    assert.equal(seen.length, 3);
   } finally {
     await up.close();
   }

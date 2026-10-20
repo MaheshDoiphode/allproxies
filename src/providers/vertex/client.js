@@ -339,59 +339,66 @@ export class VertexClient {
     });
   }
 
-  async post(url, payload, { stream = false } = {}) {
-    const tried = new Set();
+  async post(url, payload, { stream = false, maxPasses = 4, retryDelayMs = 1500 } = {}) {
     let lastError;
     let recoveredOnce = false;
-    for (let attempt = 0; attempt < 8; attempt += 1) {
-      let bundle;
-      try {
-        bundle = this.requireBundle({ exclude: tried });
-      } catch (err) {
-        lastError = err;
-        break;
-      }
-      const id = accountIdOf(bundle);
-      if (tried.has(id)) break;
-      tried.add(id);
-      const target = this.rewriteUrl(url, bundle);
-      let response;
-      try {
-        response = await this.send(target, payload, bundle, { stream });
-      } catch (err) {
-        lastError = err;
-        this.recordUsage(bundle, { ok: false });
-        if (isRetryableUpstreamError(err) && this.markFailed(bundle, err)) continue;
-        throw err;
-      }
-      if (response.status < 400) return response;
-      if (stream && response.stream) {
-        const chunks = [];
-        for await (const chunk of response.stream) chunks.push(chunk);
-        response.body = Buffer.concat(chunks).toString("utf8");
+    for (let pass = 0; pass < maxPasses; pass += 1) {
+      const tried = new Set();
+      for (let attempt = 0; attempt < 8; attempt += 1) {
+        let bundle;
         try {
-          response.parsed = JSON.parse(response.body);
-        } catch {
-          response.parsed = undefined;
+          bundle = this.requireBundle({ exclude: tried });
+        } catch (err) {
+          if (!lastError) lastError = err;
+          break;
         }
-      }
-      try {
-        this.raiseUpstream(response);
-      } catch (err) {
-        lastError = err;
-        this.recordUsage(bundle, { ok: false });
-        if (!recoveredOnce) {
-          const recovered = this.recoverPublisherMiss(bundle, err, url);
-          if (recovered) {
-            recoveredOnce = true;
-            tried.delete(id);
-            url = recovered.url;
-            continue;
+        const id = accountIdOf(bundle);
+        if (tried.has(id)) break;
+        tried.add(id);
+        const target = this.rewriteUrl(url, bundle);
+        let response;
+        try {
+          response = await this.send(target, payload, bundle, { stream });
+        } catch (err) {
+          lastError = err;
+          this.recordUsage(bundle, { ok: false });
+          if (isRetryableUpstreamError(err) && this.markFailed(bundle, err)) continue;
+          if (isRetryableUpstreamError(err) && pass + 1 < maxPasses) break;
+          throw err;
+        }
+        if (response.status < 400) return response;
+        if (stream && response.stream) {
+          const chunks = [];
+          for await (const chunk of response.stream) chunks.push(chunk);
+          response.body = Buffer.concat(chunks).toString("utf8");
+          try {
+            response.parsed = JSON.parse(response.body);
+          } catch {
+            response.parsed = undefined;
           }
         }
-        if (isRetryableUpstreamError(err) && this.markFailed(bundle, err)) continue;
-        throw err;
+        try {
+          this.raiseUpstream(response);
+        } catch (err) {
+          lastError = err;
+          this.recordUsage(bundle, { ok: false });
+          if (!recoveredOnce) {
+            const recovered = this.recoverPublisherMiss(bundle, err, url);
+            if (recovered) {
+              recoveredOnce = true;
+              tried.delete(id);
+              url = recovered.url;
+              continue;
+            }
+          }
+          if (isRetryableUpstreamError(err) && this.markFailed(bundle, err)) continue;
+          if (isRetryableUpstreamError(err) && pass + 1 < maxPasses) break;
+          throw err;
+        }
       }
+      if (!lastError || !isRetryableUpstreamError(lastError) || pass + 1 >= maxPasses) break;
+      const waitMs = Math.min(15_000, Math.max(retryDelayMs * (pass + 1), Number(lastError.retryAfterMs || 0)));
+      if (waitMs > 0) await new Promise((resolve) => setTimeout(resolve, waitMs));
     }
     throw lastError || new AuthRequiredError("Vertex login required. Add an Express Mode API key.");
   }
