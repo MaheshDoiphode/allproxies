@@ -329,7 +329,12 @@ function toolsFromAnthropic(body) {
   const tools = [];
   for (const tool of body.tools || []) {
     if (tool && typeof tool === "object") {
-      tools.push({ name: tool.name, description: tool.description, parameters: tool.input_schema || {} });
+      tools.push({
+        type: tool.type,
+        name: tool.name,
+        description: tool.description,
+        parameters: tool.input_schema || tool.parameters || null,
+      });
     }
   }
   return tools.length ? sanitizeTools(tools) : null;
@@ -389,10 +394,15 @@ export function wrapVertexGenerate({ model, contents, system, generation, tools,
   if (generation && Object.keys(generation).length) request.generationConfig = generation;
   if (tools) {
     request.tools = tools;
-    // Per Google's Vertex AI FunctionCallingConfig spec (libs/js-genai/src/types.ts),
-    // mode: "VALIDATED" constrains the model to schema-valid function calls or natural language,
-    // preventing MALFORMED_RESPONSE / MALFORMED_FUNCTION_CALL on large contexts with 70+ tools.
-    request.toolConfig = toolConfig || { functionCallingConfig: { mode: "VALIDATED" } };
+    const hasFunctionDeclarations = Array.isArray(tools) && tools.some((t) => t?.functionDeclarations?.length);
+    if (hasFunctionDeclarations) {
+      // Per Google's Vertex AI FunctionCallingConfig spec (libs/js-genai/src/types.ts),
+      // mode: "VALIDATED" constrains the model to schema-valid function calls or natural language,
+      // preventing MALFORMED_RESPONSE / MALFORMED_FUNCTION_CALL on large contexts with 70+ tools.
+      request.toolConfig = toolConfig || { functionCallingConfig: { mode: "VALIDATED" } };
+    } else if (toolConfig) {
+      request.toolConfig = toolConfig;
+    }
   } else if (toolConfig) {
     request.toolConfig = toolConfig;
   }
@@ -403,7 +413,8 @@ export function recoverMalformedVertexRequest(wrapped, { attempt = 2, lastFinish
   if (!wrapped || attempt <= 1) return wrapped;
   const req = wrapped.request || {};
   const nextReq = { ...req };
-  if (req.tools) {
+  const hasFunctionDeclarations = Array.isArray(req.tools) && req.tools.some((t) => t?.functionDeclarations?.length);
+  if (hasFunctionDeclarations) {
     // Switch between AUTO and VALIDATED and nudge the final turn so the model emits a clean call.
     nextReq.toolConfig = {
       functionCallingConfig: { mode: attempt % 2 === 0 ? "AUTO" : "VALIDATED" },

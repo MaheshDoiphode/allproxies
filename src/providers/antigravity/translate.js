@@ -442,8 +442,10 @@ export function wrapGenerate({ model, project, contents, system, generation, too
   if (generation) request.generationConfig = generation;
   const isClaude = String(model).toLowerCase().includes("claude");
   if (tools) {
-    request.tools = sanitizeTools(tools, { jsonSchema: isClaude });
-    if (!isClaude) {
+    const sanitized = sanitizeTools(tools, { jsonSchema: isClaude });
+    request.tools = sanitized;
+    const hasFunctionDeclarations = Array.isArray(sanitized) && sanitized.some((t) => t?.functionDeclarations?.length);
+    if (!isClaude && hasFunctionDeclarations) {
       request.toolConfig = { functionCallingConfig: { mode: "VALIDATED" } };
     }
   }
@@ -462,7 +464,8 @@ export function recoverMalformedRequest(wrapped, { attempt = 2, lastFinish = "" 
   if (!wrapped || attempt <= 1) return wrapped;
   const req = wrapped.request || {};
   const nextReq = { ...req };
-  if (req.tools && !String(wrapped.model).toLowerCase().includes("claude")) {
+  const hasFunctionDeclarations = Array.isArray(req.tools) && req.tools.some((t) => t?.functionDeclarations?.length);
+  if (hasFunctionDeclarations && !String(wrapped.model).toLowerCase().includes("claude")) {
     nextReq.toolConfig = {
       functionCallingConfig: { mode: attempt % 2 === 0 ? "AUTO" : "VALIDATED" },
     };
@@ -541,7 +544,12 @@ export function anthropicToUpstream(body, { model, project, effort } = {}) {
   const tools = [];
   for (const tool of body.tools || []) {
     if (tool && typeof tool === "object") {
-      tools.push({ name: tool.name, description: tool.description, parameters: tool.input_schema || {} });
+      tools.push({
+        type: tool.type,
+        name: tool.name,
+        description: tool.description,
+        parameters: tool.input_schema || tool.parameters || null,
+      });
     }
   }
   return wrapGenerate({
@@ -653,6 +661,39 @@ export function geminiToOpenai(payload, model) {
   };
 }
 
+function groundingToAnthropicWebSearchBlocks(groundingMetadata) {
+  if (!groundingMetadata || typeof groundingMetadata !== "object") return [];
+  const queries = Array.isArray(groundingMetadata.webSearchQueries)
+    ? groundingMetadata.webSearchQueries.filter((q) => typeof q === "string" && q.trim())
+    : [];
+  const chunks = Array.isArray(groundingMetadata.groundingChunks)
+    ? groundingMetadata.groundingChunks.map((c) => c?.web).filter((w) => w && (w.uri || w.title))
+    : [];
+  if (!queries.length && !chunks.length) return [];
+  const toolUseId = `srvtoolu_${crypto.randomUUID().replace(/-/g, "").slice(0, 20)}`;
+  const query = queries[0] || "web search";
+  const results = (chunks.length ? chunks : [{ uri: "https://www.google.com/search?q=" + encodeURIComponent(query), title: query }]).map((w) => ({
+    type: "web_search_result",
+    url: String(w.uri || ""),
+    title: String(w.title || w.domain || w.uri || "Result"),
+    encrypted_content: Buffer.from(String(w.title || w.uri || "")).toString("base64"),
+    page_age: null,
+  }));
+  return [
+    {
+      type: "server_tool_use",
+      id: toolUseId,
+      name: "web_search",
+      input: { query },
+    },
+    {
+      type: "web_search_tool_result",
+      tool_use_id: toolUseId,
+      content: results,
+    },
+  ];
+}
+
 export function geminiToAnthropic(payload, model) {
   const inner = unwrapResponse(payload);
   const first = (inner.candidates || [])[0] || {};
@@ -660,6 +701,7 @@ export function geminiToAnthropic(payload, model) {
   const content = [];
   const reasoning = partsToText(parts, true);
   if (reasoning) content.push({ type: "thinking", thinking: reasoning });
+  content.push(...groundingToAnthropicWebSearchBlocks(first.groundingMetadata));
   const text = partsToText(parts, false);
   if (text) content.push({ type: "text", text });
   for (const call of partsToToolCalls(parts)) {
@@ -671,6 +713,9 @@ export function geminiToAnthropic(payload, model) {
     });
   }
   const usage = anthropicUsageFromGemini(inner);
+  if (content.some((part) => part.type === "server_tool_use")) {
+    usage.server_tool_use = { web_search_requests: 1 };
+  }
   let stop = content.some((part) => part.type === "tool_use") ? "tool_use" : "end_turn";
   if (String(first.finishReason || "").toUpperCase() === "MAX_TOKENS") stop = "max_tokens";
   return {
@@ -711,16 +756,17 @@ export class AnthropicStreamAccumulator {
     this.stop = "end_turn";
     this.started = false;
     this.seenCallIds = new Set();
+    this.emittedGrounding = false;
     this.thinkingSignatureSent = false;
     this.upstreamFinish = null;
   }
 
   get hasContent() {
-    return Boolean(this.seenText || this.seenThoughts || this.seenCallIds.size);
+    return Boolean(this.seenText || this.seenThoughts || this.seenCallIds.size || this.emittedGrounding);
   }
 
   get hasVisibleContent() {
-    return Boolean(this.seenText.trim()) || this.seenCallIds.size > 0;
+    return Boolean(this.seenText.trim()) || this.seenCallIds.size > 0 || this.emittedGrounding;
   }
 
   start() {
@@ -771,6 +817,35 @@ export class AnthropicStreamAccumulator {
       }
       events.push({ type: "content_block_delta", index: this.thinkIndex, delta: { type: "thinking_delta", thinking: extraThoughts } });
       this.seenThoughts = thoughts;
+    }
+    if (!this.emittedGrounding && candidates[0].groundingMetadata) {
+      const searchBlocks = groundingToAnthropicWebSearchBlocks(candidates[0].groundingMetadata);
+      if (searchBlocks.length === 2) {
+        this.emittedGrounding = true;
+        this.usage.server_tool_use = { web_search_requests: 1 };
+        const [srvUse, srvRes] = searchBlocks;
+        const useIdx = this.block;
+        this.block += 1;
+        events.push({
+          type: "content_block_start",
+          index: useIdx,
+          content_block: { type: "server_tool_use", id: srvUse.id, name: "web_search", input: {} },
+        });
+        events.push({
+          type: "content_block_delta",
+          index: useIdx,
+          delta: { type: "input_json_delta", partial_json: JSON.stringify(srvUse.input) },
+        });
+        events.push({ type: "content_block_stop", index: useIdx });
+        const resIdx = this.block;
+        this.block += 1;
+        events.push({
+          type: "content_block_start",
+          index: resIdx,
+          content_block: srvRes,
+        });
+        events.push({ type: "content_block_stop", index: resIdx });
+      }
     }
     const text = partsToText(parts, false);
     const extraText = text.startsWith(this.seenText) ? text.slice(this.seenText.length) : text;

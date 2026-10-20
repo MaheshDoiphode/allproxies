@@ -1,7 +1,9 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
+  AnthropicStreamAccumulator,
   anthropicToVertex,
+  geminiToAnthropic,
   mediaPartFromUrl,
   openaiContentToVertexParts,
   openaiToVertex,
@@ -237,6 +239,53 @@ test("vertex tool requests set VALIDATED functionCallingConfig and recover on MA
   const lastParts = retry2.request.contents.at(-1).parts;
   assert.ok(lastParts.some((p) => typeof p.text === "string" && p.text.includes("emit valid JSON arguments")));
 });
+
+test("anthropic web_search_20250305 uses Vertex googleSearch grounding and emits server_tool_use + web_search_tool_result", () => {
+  const wrapped = anthropicToVertex(
+    {
+      model: "vertex/gemini-4-argon",
+      max_tokens: 1024,
+      tools: [{ type: "web_search_20250305", name: "web_search", max_uses: 5 }],
+      messages: [{ role: "user", content: "Search the web for todoTask openTypeExtension" }],
+    },
+    { model: "gemini-4-argon" },
+  );
+  assert.deepEqual(wrapped.request.tools, [{ googleSearch: {} }]);
+  // Grounding requests must not send functionCallingConfig: VALIDATED
+  assert.equal(wrapped.request.toolConfig, undefined);
+
+  const geminiPayload = {
+    candidates: [
+      {
+        content: { role: "model", parts: [{ text: "Open extensions are supported on todoTask." }] },
+        groundingMetadata: {
+          webSearchQueries: ["todoTask openTypeExtension Graph API"],
+          groundingChunks: [
+            { web: { uri: "https://learn.microsoft.com/en-us/graph/api/resources/todotask", title: "todoTask resource type" } },
+          ],
+        },
+        finishReason: "STOP",
+      },
+    ],
+    usageMetadata: { promptTokenCount: 100, candidatesTokenCount: 25 },
+  };
+
+  const nonStream = geminiToAnthropic(geminiPayload, "gemini-4-argon");
+  assert.equal(nonStream.content[0].type, "server_tool_use");
+  assert.equal(nonStream.content[0].name, "web_search");
+  assert.deepEqual(nonStream.content[0].input, { query: "todoTask openTypeExtension Graph API" });
+  assert.equal(nonStream.content[1].type, "web_search_tool_result");
+  assert.equal(nonStream.content[1].content[0].url, "https://learn.microsoft.com/en-us/graph/api/resources/todotask");
+  assert.deepEqual(nonStream.usage.server_tool_use, { web_search_requests: 1 });
+
+  const acc = new AnthropicStreamAccumulator("gemini-4-argon");
+  const events = [...acc.ingest(geminiPayload), ...acc.finish()];
+  assert.ok(events.some((e) => e.type === "content_block_start" && e.content_block?.type === "server_tool_use"));
+  assert.ok(events.some((e) => e.type === "content_block_start" && e.content_block?.type === "web_search_tool_result"));
+  const delta = events.find((e) => e.type === "message_delta");
+  assert.deepEqual(delta.usage.server_tool_use, { web_search_requests: 1 });
+});
+
 
 
 

@@ -99,26 +99,53 @@ export function sanitizeSchema(node) {
   return cleaned;
 }
 
+function ensureObjectSchema(schema) {
+  const next = schema && typeof schema === "object" && !Array.isArray(schema) ? { ...schema } : {};
+  if (!next.type || String(next.type).toLowerCase() !== "object") {
+    next.type = "object";
+  }
+  if (!next.properties || typeof next.properties !== "object" || Array.isArray(next.properties)) {
+    next.properties = {};
+  }
+  return next;
+}
+
 // `jsonSchema` selects the wire field. Gemini takes Google's Schema subset in `parameters`. Claude (served
 // through the same endpoint) rejects Gemini-style `parameters` containing anyOf with
 // "input_schema: JSON schema is invalid ... draft 2020-12", but accepts a plain JSON Schema in
 // `parametersJsonSchema`.
 function cleanDeclaration(decl, { jsonSchema = false } = {}) {
-  const parameters = decl.parameters || decl.parametersJsonSchema || decl.input_schema || {};
-  const cleaned = parameters && typeof parameters === "object" ? sanitizeSchema(parameters) : { type: "object", properties: {} };
+  const isAnthropicWebSearch = typeof decl.type === "string" && /^web_search/i.test(decl.type);
+  const rawParams = decl.parameters || decl.parametersJsonSchema || decl.input_schema || (
+    isAnthropicWebSearch
+      ? {
+          type: "object",
+          properties: {
+            query: { type: "string", description: "The search query to execute." },
+          },
+          required: ["query"],
+        }
+      : {}
+  );
+  const cleaned = ensureObjectSchema(rawParams && typeof rawParams === "object" ? sanitizeSchema(rawParams) : {});
   const base = {
-    name: sanitizeToolName(String(decl.name || "tool")),
-    description: String(decl.description || ""),
+    name: sanitizeToolName(String(decl.name || (isAnthropicWebSearch ? "web_search" : "tool"))),
+    description: String(decl.description || (isAnthropicWebSearch ? "Search the web for current information." : "")),
   };
   if (!jsonSchema) return { ...base, parameters: cleaned };
-  return { ...base, parametersJsonSchema: { type: "object", ...(Object.keys(cleaned).length ? cleaned : { properties: {} }) } };
+  return { ...base, parametersJsonSchema: cleaned };
 }
 
 export function sanitizeTools(tools, options = {}) {
   const declarations = [];
   let googleSearch = false;
   for (const tool of tools || []) {
-    if (tool.googleSearch != null || tool.google_search != null) {
+    if (!tool || typeof tool !== "object") continue;
+    if (
+      tool.googleSearch != null ||
+      tool.google_search != null ||
+      (typeof tool.type === "string" && /^web_search/i.test(tool.type))
+    ) {
       googleSearch = true;
       continue;
     }

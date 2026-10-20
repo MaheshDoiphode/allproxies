@@ -65,3 +65,14 @@ test("google search not mixed with functions", () => {
   ]);
   assert.deepEqual(sanitizeTools([{ google_search: {} }]), [{ googleSearch: {} }]);
 });
+
+test("anthropic built-in web_search_20250305 maps to googleSearch grounding and schema-less tools get type object", () => {
+  assert.deepEqual(sanitizeTools([{ type: "web_search_20250305", name: "web_search", max_uses: 5 }]), [
+    { googleSearch: {} },
+  ]);
+  const tools = sanitizeTools([{ name: "custom_no_schema", input_schema: {} }]);
+  const decls = tools[0].functionDeclarations;
+  assert.equal(decls[0].name, "custom_no_schema");
+  assert.deepEqual(decls[0].parameters, { type: "object", properties: {} });
+});
+
