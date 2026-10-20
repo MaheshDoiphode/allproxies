@@ -93,7 +93,7 @@ export function isTransientStreamError(err) {
 // Thoughts alone don't count: Gemini often streams thoughts and then ends with MALFORMED_FUNCTION_CALL and
 // no call, and a turn like that can only be retried if the client hasn't seen the thoughts yet. If the
 // model keeps thinking for `holdThoughtsMs`, they are released so long reasoning still streams live.
-export async function* streamAnthropicMessages({ open, makeAccumulator, maxAttempts = 3, backoffMs = 400, holdThoughtsMs = 20_000, log }) {
+export async function* streamAnthropicMessages({ open, makeAccumulator, maxAttempts = 3, backoffMs = 400, holdThoughtsMs = 3_000, log }) {
   let acc;
   let held = [];
   for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
@@ -104,7 +104,7 @@ export async function* streamAnthropicMessages({ open, makeAccumulator, maxAttem
     try {
       for await (const event of withIdlePings(open())) {
         if (event?.__ping) {
-          yield formatSse("ping", { type: "ping" });
+          if (opened) yield formatSse("ping", { type: "ping" });
           continue;
         }
         for (const item of acc.ingest(event)) {

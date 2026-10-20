@@ -7,6 +7,7 @@ import {
   normalizeContents,
   openaiMessagesToGemini,
   openaiToResponses,
+  outputTokenFloor,
   responsesToChatBody,
   responsesAssistantMessage,
   StreamAccumulator,
@@ -70,10 +71,11 @@ export function vertexThinkingFromRequest(model, body = {}, effort) {
   }
   const resolved = normalizeEffort(rawEffort);
   if (resolved === "none") return null;
+  const isGemini3Or4 = /gemini-[34]/i.test(String(model || ""));
   if (thinking && typeof thinking === "object") {
     if (thinking.type === "disabled" || thinking.type === "none") return null;
     const config = {};
-    const level = thinking.thinkingLevel || thinking.thinking_level || thinking.level;
+    const level = thinking.thinkingLevel || thinking.thinking_level || thinking.level || thinking.effort;
     const budget = thinking.thinkingBudget ?? thinking.budget_tokens ?? thinking.thinking_budget;
     if (level) {
       const wire = thinkingLevelWire(level);
@@ -84,7 +86,23 @@ export function vertexThinkingFromRequest(model, body = {}, effort) {
         config.thinkingLevel = wire;
       }
     }
-    if (budget != null && Number.isFinite(Number(budget))) config.thinkingBudget = Number(budget);
+    if (!config.thinkingLevel && resolved) {
+      const wire = thinkingLevelWire(resolved);
+      if (wire === "MINIMAL") {
+        config.thinkingLevel = "LOW";
+        config.includeThoughts = false;
+      } else if (wire) {
+        config.thinkingLevel = wire;
+      }
+    }
+    if (!config.thinkingLevel && budget != null && Number.isFinite(Number(budget))) {
+      const b = Number(budget);
+      if (isGemini3Or4) {
+        config.thinkingLevel = b <= 4096 ? "LOW" : b <= 16384 ? "MEDIUM" : "HIGH";
+      } else {
+        config.thinkingBudget = b;
+      }
+    }
     if (thinking.includeThoughts != null || thinking.include_thoughts != null) {
       config.includeThoughts = Boolean(thinking.includeThoughts ?? thinking.include_thoughts);
     } else if (Object.keys(config).length && config.includeThoughts == null) {
@@ -288,7 +306,12 @@ function generationFromChat(body, { model, effort } = {}) {
     generation.responseMimeType = "application/json";
   }
   const thinking = vertexThinkingFromRequest(model, body, effort);
-  if (thinking) generation.thinkingConfig = thinking;
+  if (thinking) {
+    generation.thinkingConfig = thinking;
+    if (generation.maxOutputTokens != null && thinking.thinkingBudget) {
+      generation.maxOutputTokens = outputTokenFloor(generation.maxOutputTokens, thinking);
+    }
+  }
   const modalities = responseModalitiesFromBody(body, model);
   if (modalities) generation.responseModalities = modalities;
   const imageConfig = imageConfigFromBody(body);

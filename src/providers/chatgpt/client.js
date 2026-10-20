@@ -738,7 +738,7 @@ export class ChatgptClient {
     try {
       for await (const event of withIdlePings(iterateSse(response.stream))) {
         if (event?.__ping) {
-          yield formatSse("ping", { type: "ping" });
+          if (opened) yield formatSse("ping", { type: "ping" });
           continue;
         }
         for (const item of acc.ingest(event).anthropic) {

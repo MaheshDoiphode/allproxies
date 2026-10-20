@@ -136,18 +136,33 @@ test("parallel anthropic tool calls and results are grouped into matching turns"
   assert.equal(userTurns[0].parts[1].functionResponse.name, "ReadFile");
 });
 
-test("anthropic messages keep thinking budget when given", () => {
-  const wrapped = anthropicToVertex(
+test("anthropic messages keep thinking budget on 2.5 and map budget to thinkingLevel on Gemini 3/4", () => {
+  const flash25 = anthropicToVertex(
     {
-      model: "gemini-3.8-flash",
+      model: "gemini-2.5-flash",
       max_tokens: 128,
       thinking: { type: "enabled", budget_tokens: 2048 },
       messages: [{ role: "user", content: "hi" }],
     },
-    { model: "gemini-3.8-flash" },
+    { model: "gemini-2.5-flash" },
   );
-  assert.equal(wrapped.request.generationConfig.thinkingConfig.thinkingBudget, 2048);
-  assert.equal(wrapped.request.generationConfig.maxOutputTokens, 128);
+  assert.equal(flash25.request.generationConfig.thinkingConfig.thinkingBudget, 2048);
+  assert.ok(flash25.request.generationConfig.maxOutputTokens >= 2048 + 4096);
+
+  const argon = anthropicToVertex(
+    {
+      model: "gemini-4-argon",
+      max_tokens: 128,
+      thinking: { type: "enabled", budget_tokens: 32000 },
+      messages: [{ role: "user", content: "hi" }],
+    },
+    { model: "gemini-4-argon" },
+  );
+  assert.deepEqual(argon.request.generationConfig.thinkingConfig, {
+    includeThoughts: true,
+    thinkingLevel: "HIGH",
+  });
+  assert.equal(argon.request.generationConfig.maxOutputTokens, 128);
 });
 
 test("gemini-4-argon maps thinking and routing properly", () => {

@@ -365,7 +365,7 @@ export class VertexClient {
     });
   }
 
-  async post(url, payload, { stream = false, maxPasses = 4, retryDelayMs = 1500 } = {}) {
+  async post(url, payload, { stream = false, maxPasses = 2, retryDelayMs = 800 } = {}) {
     let lastError;
     let recoveredOnce = false;
     for (let pass = 0; pass < maxPasses; pass += 1) {

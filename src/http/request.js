@@ -4,11 +4,18 @@ import https from "node:https";
 const HTTP_AGENT = new http.Agent({ keepAlive: true, maxSockets: 64, maxFreeSockets: 16 });
 const HTTPS_AGENT = new https.Agent({ keepAlive: true, maxSockets: 64, maxFreeSockets: 16 });
 
-function requestOnce(url, { method = "GET", headers = {}, body, timeoutMs = 30_000, stream = false } = {}) {
+function requestOnce(url, { method = "GET", headers = {}, body, timeoutMs = 30_000, firstByteTimeoutMs, stream = false } = {}) {
   return new Promise((resolve, reject) => {
     const parsed = new URL(url);
     const isHttp = parsed.protocol === "http:";
     const lib = isHttp ? http : https;
+    let firstByteTimer = null;
+    const clearFirstByteTimer = () => {
+      if (firstByteTimer) {
+        clearTimeout(firstByteTimer);
+        firstByteTimer = null;
+      }
+    };
     const req = lib.request(
       {
         protocol: parsed.protocol,
@@ -20,6 +27,7 @@ function requestOnce(url, { method = "GET", headers = {}, body, timeoutMs = 30_0
         agent: isHttp ? HTTP_AGENT : HTTPS_AGENT,
       },
       (res) => {
+        clearFirstByteTimer();
         if (stream) {
           resolve({
             status: res.statusCode || 0,
@@ -44,11 +52,24 @@ function requestOnce(url, { method = "GET", headers = {}, body, timeoutMs = 30_0
         });
       },
     );
-    req.on("error", reject);
+    req.on("error", (err) => {
+      clearFirstByteTimer();
+      reject(err);
+    });
+    const connectLimitMs = stream
+      ? Math.min(timeoutMs, Number(firstByteTimeoutMs || 45_000))
+      : timeoutMs;
+    if (connectLimitMs > 0) {
+      firstByteTimer = setTimeout(() => {
+        req.destroy(new Error(`Upstream response headers timed out after ${connectLimitMs}ms`));
+      }, connectLimitMs);
+    }
     req.setTimeout(timeoutMs, () => {
+      clearFirstByteTimer();
       req.destroy(new Error(`Request timed out after ${timeoutMs}ms`));
     });
     req.on("timeout", () => {
+      clearFirstByteTimer();
       req.destroy(new Error(`Request timed out after ${timeoutMs}ms`));
     });
     if (body) req.write(body);
