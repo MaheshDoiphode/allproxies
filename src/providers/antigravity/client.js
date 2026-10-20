@@ -78,6 +78,25 @@ export class AntigravityClient {
     this.quotaCache = new Map();
     this.quotaTtlMs = 30_000;
     this.stats = { requests: 0, success: 0, failed: 0, prompt_tokens: 0, completion_tokens: 0 };
+    this.inFlight = new Map();
+  }
+
+  inFlightOf(item) {
+    return this.inFlight.get(accountIdOf(item)) || 0;
+  }
+
+  acquireSlot(bundle) {
+    const id = accountIdOf(bundle);
+    if (!id) return () => {};
+    this.inFlight.set(id, (this.inFlight.get(id) || 0) + 1);
+    let released = false;
+    return () => {
+      if (released) return;
+      released = true;
+      const next = (this.inFlight.get(id) || 1) - 1;
+      if (next <= 0) this.inFlight.delete(id);
+      else this.inFlight.set(id, next);
+    };
   }
 
   usageStats() {
@@ -246,10 +265,11 @@ export class AntigravityClient {
     const accounts = this.store.list();
     const current = this.store.load();
     const usable = (item) => item?.refresh_token && !isAccountDisabled(item, now) && !skip.has(accountIdOf(item));
-    if (usable(current) && projectOf(current)) return current;
     const ready = accounts
       .filter((item) => usable(item) && projectOf(item))
-      .sort((a, b) => (a.last_used || 0) - (b.last_used || 0));
+      .sort((a, b) => this.inFlightOf(a) - this.inFlightOf(b) || (a.last_used || 0) - (b.last_used || 0));
+    const minReadyBusy = ready.length ? this.inFlightOf(ready[0]) : Infinity;
+    if (usable(current) && projectOf(current) && this.inFlightOf(current) <= minReadyBusy) return current;
     if (ready[0]) {
       if (!current || accountIdOf(ready[0]) !== accountIdOf(current)) {
         this.store.use(accountIdOf(ready[0]));
@@ -259,8 +279,9 @@ export class AntigravityClient {
       }
       return ready[0];
     }
-    if (usable(current)) return current;
-    const any = accounts.find(usable);
+    const pool = accounts.filter(usable).sort((a, b) => this.inFlightOf(a) - this.inFlightOf(b) || (a.last_used || 0) - (b.last_used || 0));
+    if (usable(current) && (!pool.length || this.inFlightOf(current) <= this.inFlightOf(pool[0]))) return current;
+    const any = pool[0];
     if (any) {
       this.store.use(accountIdOf(any));
       return any;
@@ -456,11 +477,13 @@ export class AntigravityClient {
       const id = accountIdOf(bundle);
       if (tried.has(id)) break;
       tried.add(id);
+      const releaseSlot = this.acquireSlot(bundle);
       const requestPayload = { ...payload, project: projectOf(bundle) || payload.project };
       let response;
       try {
         response = await this.send(url, requestPayload, bundle.access_token, stream);
       } catch (err) {
+        releaseSlot();
         lastError = err;
         this.recordUsage(bundle, { ok: false });
         if (isRetryableUpstreamError(err) && this.markFailed(bundle, err)) continue;
@@ -479,10 +502,12 @@ export class AntigravityClient {
             requestPayload.project = projectOf(bundle) || requestPayload.project;
             response = await this.send(url, requestPayload, bundle.access_token, stream);
           } else {
+            releaseSlot();
             tried.delete(id);
             continue;
           }
         } catch (err) {
+          releaseSlot();
           lastError = err;
           this.recordUsage(this.findAccount(id) || bundle, { ok: false });
           if (isRetryableUpstreamError(err) && this.markFailed(this.findAccount(id) || bundle, err)) continue;
@@ -490,17 +515,26 @@ export class AntigravityClient {
         }
       }
       if (response.status < 400) {
+        response.bundle = bundle;
+        response.releaseSlot = releaseSlot;
+        if (!stream) releaseSlot();
         return response;
       }
       if (stream && response.stream) {
         const chunks = [];
-        for await (const chunk of response.stream) chunks.push(chunk);
+        try {
+          for await (const chunk of response.stream) chunks.push(chunk);
+        } finally {
+          releaseSlot();
+        }
         response.body = Buffer.concat(chunks).toString("utf8");
         try {
           response.parsed = JSON.parse(response.body);
         } catch {
           response.parsed = undefined;
         }
+      } else {
+        releaseSlot();
       }
       try {
         this.raiseUpstream(response);
@@ -690,6 +724,7 @@ export class AntigravityClient {
       }
     } finally {
       if (this.settings.debugRequests) console.log(`[up] stream events=${events} model=${payload.model}`);
+      response.releaseSlot?.();
       response.stream?.resume();
     }
   }

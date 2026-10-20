@@ -22,25 +22,40 @@ function shouldReadJson(path) {
 }
 
 function writeSseHead(res) {
+  res.socket?.setNoDelay?.(true);
   res.writeHead(200, {
     "Content-Type": "text/event-stream; charset=utf-8",
-    "Cache-Control": "no-cache",
+    "Cache-Control": "no-cache, no-transform",
     Connection: "keep-alive",
     "X-Accel-Buffering": "no",
   });
+  res.flushHeaders?.();
 }
 
 async function pipeSse(res, source) {
   const iter = source[Symbol.asyncIterator]();
+  let clientClosed = false;
+  const onClose = () => {
+    if (res.writableFinished) return;
+    clientClosed = true;
+    Promise.resolve(iter.return?.()).catch(() => {});
+  };
+  res.on("close", onClose);
   let first;
   try {
     first = await iter.next();
   } catch (err) {
-    if (!res.headersSent) {
+    res.off("close", onClose);
+    if (!res.headersSent && !clientClosed) {
       sendJson(res, err.status || 502, err.payload || { error: { message: err.message, type: "api_error" } });
       return;
     }
+    if (clientClosed) return;
     throw err;
+  }
+  if (clientClosed) {
+    res.off("close", onClose);
+    return;
   }
   writeSseHead(res);
   try {
@@ -48,20 +63,25 @@ async function pipeSse(res, source) {
       res.write(first.value);
       flush(res);
     }
-    while (true) {
+    while (!clientClosed) {
       const next = await iter.next();
-      if (next.done) break;
+      if (next.done || clientClosed) break;
       if (next.value) {
         res.write(next.value);
         flush(res);
       }
     }
-    res.end();
+    if (!res.writableEnded) res.end();
   } catch (err) {
-    if (!res.writableEnded) {
+    if (!clientClosed && !res.writableEnded) {
       res.write(`event: error\ndata: ${JSON.stringify({ type: "error", error: { type: err?.payload?.error?.type || "api_error", message: err.message } })}\n\n`);
       flush(res);
       res.end();
+    }
+  } finally {
+    res.off("close", onClose);
+    if (!first?.done) {
+      Promise.resolve(iter.return?.()).catch(() => {});
     }
   }
 }

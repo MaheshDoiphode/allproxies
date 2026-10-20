@@ -296,7 +296,9 @@ export class VertexClient {
     const next = pool
       .slice()
       .sort((a, b) => this.inFlightOf(a) - this.inFlightOf(b) || (a.last_used || 0) - (b.last_used || 0))[0];
-    if (!current || accountIdOf(next) !== accountIdOf(current)) this.store.use(accountIdOf(next));
+    if (!current || (this.inFlightOf(current) === 0 && accountIdOf(next) !== accountIdOf(current))) {
+      this.store.use(accountIdOf(next));
+    }
     return next;
   }
 

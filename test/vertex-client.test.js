@@ -575,3 +575,75 @@ test("vertex spreads concurrent requests across idle enabled keys instead of sta
   }
 });
 
+test("vertex streams multiple concurrent /v1/messages SSE requests in parallel without blocking earlier windows", async () => {
+  const dir = tempDir();
+  const seen = [];
+  let releaseFirst;
+  const firstEntered = new Promise((resolve) => {
+    releaseFirst = resolve;
+  });
+  let unblockFirst;
+  const holdFirst = new Promise((resolve) => {
+    unblockFirst = resolve;
+  });
+  const up = await mockServer(async ({ req, url, res }) => {
+    const key = req.headers["x-goog-api-key"];
+    seen.push({ key, path: url.pathname });
+    res.writeHead(200, { "Content-Type": "text/event-stream; charset=utf-8" });
+    if (key === "AQ.first") {
+      releaseFirst();
+      await holdFirst;
+    }
+    res.write(`data: ${JSON.stringify({ candidates: [{ content: { role: "model", parts: [{ text: `stream:${key}` }] }, finishReason: "STOP" }] })}\n\n`);
+    res.end();
+  });
+  const tokenPath = path.join(dir, "vertex-tokens.db");
+  const store = new TokenStore(tokenPath);
+  store.save(createVertexBundle({
+    api_key: "AQ.first",
+    label: "cpt",
+    email: "cpt",
+    project_id: "project-one",
+  }));
+  store.save(createVertexBundle({
+    api_key: "AQ.second",
+    label: "cpt.brb.jfq",
+    email: "cpt.brb.jfq",
+    project_id: "project-two",
+  }));
+  store.use("cpt");
+  const vertex = new VertexClient(testSettings(dir, {
+    vertexTokenPath: tokenPath,
+    vertexBaseUrl: up.url,
+    liveModels: false,
+  }));
+  const api = await startApi(dir, {
+    settings: testSettings(dir, { liveModels: false }),
+    vertex,
+  });
+  try {
+    const req1 = request(api.url, "/v1/messages", {
+      method: "POST",
+      headers: { Authorization: "Bearer test-key" },
+      json: { model: "vertex/gemini-4-argon", stream: true, max_tokens: 32, messages: [{ role: "user", content: "window 1" }] },
+    });
+    await firstEntered;
+    const req2 = await request(api.url, "/v1/messages", {
+      method: "POST",
+      headers: { Authorization: "Bearer test-key" },
+      json: { model: "vertex/gemini-4-argon", stream: true, max_tokens: 32, messages: [{ role: "user", content: "window 2" }] },
+    });
+    unblockFirst();
+    const out1 = await req1;
+    assert.equal(out1.status, 200);
+    assert.equal(req2.status, 200);
+    assert.match(out1.body, /stream:AQ\.first/);
+    assert.match(req2.body, /stream:AQ\.second/);
+    assert.deepEqual(seen.map((item) => item.key), ["AQ.first", "AQ.second"]);
+    assert.equal(vertex.inFlight.size, 0);
+  } finally {
+    await api.close();
+    await up.close();
+  }
+});
+

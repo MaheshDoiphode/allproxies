@@ -126,6 +126,12 @@ export async function* iterateSse(readable, { onFirstBytes } = {}) {
       }
     }
   };
-  for await (const chunk of readable) yield* flush(chunk);
-  if (buffer.trim()) yield* flush("\n\n");
+  try {
+    for await (const chunk of readable) yield* flush(chunk);
+    if (buffer.trim()) yield* flush("\n\n");
+  } finally {
+    if (readable && !readable.complete && !readable.destroyed) {
+      readable.destroy();
+    }
+  }
 }

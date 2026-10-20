@@ -15,33 +15,66 @@ export function formatSse(event, payload) {
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 export async function* withIdlePings(source, idleMs = 10_000) {
+  const iter = source[Symbol.asyncIterator]();
   const pending = [];
   let done = false;
   let fail;
-  let last = Date.now();
+  let notify = null;
+  const wake = () => {
+    const fn = notify;
+    notify = null;
+    fn?.();
+  };
   const pull = (async () => {
     try {
-      for await (const event of source) pending.push(event);
+      while (true) {
+        const next = await iter.next();
+        if (next.done) break;
+        pending.push(next.value);
+        wake();
+      }
     } catch (err) {
       fail = err;
     } finally {
       done = true;
+      wake();
     }
   })();
-  while (!done || pending.length) {
-    if (pending.length) {
-      last = Date.now();
-      yield pending.shift();
-      continue;
+  try {
+    while (!done || pending.length) {
+      if (pending.length) {
+        yield pending.shift();
+        continue;
+      }
+      if (done) break;
+      let timer;
+      const pinged = await new Promise((resolve) => {
+        if (done || pending.length) {
+          resolve(false);
+          return;
+        }
+        notify = () => resolve(false);
+        timer = setTimeout(() => {
+          notify = null;
+          resolve(true);
+        }, idleMs);
+      });
+      clearTimeout(timer);
+      if (pinged && !done && !pending.length) {
+        yield { __ping: true };
+      }
     }
-    if (Date.now() - last >= idleMs) {
-      last = Date.now();
-      yield { __ping: true };
+    await pull;
+    if (fail) throw fail;
+  } finally {
+    if (!done) {
+      try {
+        await iter.return?.();
+      } catch {
+        // ignore cleanup error
+      }
     }
-    await sleep(200);
   }
-  await pull;
-  if (fail) throw fail;
 }
 
 const NETWORK_ERROR = /econnreset|econnrefused|etimedout|epipe|socket hang up|network|timed out|terminated|eai_again|und_err|aborted/i;
@@ -71,7 +104,7 @@ export async function* streamAnthropicMessages({ open, makeAccumulator, maxAttem
     try {
       for await (const event of withIdlePings(open())) {
         if (event?.__ping) {
-          if (opened) yield formatSse("ping", { type: "ping" });
+          yield formatSse("ping", { type: "ping" });
           continue;
         }
         for (const item of acc.ingest(event)) {
