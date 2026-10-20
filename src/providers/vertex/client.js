@@ -73,6 +73,26 @@ export class VertexClient {
     this.modelsTtlMs = 60_000;
     this.catalog = { at: 0, error: null, listed: this.modelsCache.models.length, source: "express" };
     this.stats = { requests: 0, success: 0, failed: 0, prompt_tokens: 0, completion_tokens: 0 };
+    this.inFlight = new Map();
+    this.catalogPromise = null;
+  }
+
+  inFlightOf(item) {
+    return this.inFlight.get(accountIdOf(item)) || 0;
+  }
+
+  acquireSlot(bundle) {
+    const id = accountIdOf(bundle);
+    if (!id) return () => {};
+    this.inFlight.set(id, (this.inFlight.get(id) || 0) + 1);
+    let released = false;
+    return () => {
+      if (released) return;
+      released = true;
+      const next = (this.inFlight.get(id) || 1) - 1;
+      if (next <= 0) this.inFlight.delete(id);
+      else this.inFlight.set(id, next);
+    };
   }
 
   usageStats() {
@@ -266,14 +286,18 @@ export class VertexClient {
     // Enabled keys stay in the pool. Dashboard "ready"/last-used and leftover disabled_until
     // parks must not hide a key the user left enabled.
     const usable = (item) => vertexApiKeyOf(item) && !isManuallyDisabled(item) && !skip.has(accountIdOf(item));
-    if (usable(current)) return current;
-    const next = accounts.filter(usable).sort((a, b) => (a.last_used || 0) - (b.last_used || 0))[0];
-    if (next) {
-      if (!current || accountIdOf(next) !== accountIdOf(current)) this.store.use(accountIdOf(next));
-      return next;
+    const pool = accounts.filter(usable);
+    if (!pool.length) {
+      if (!accounts.length) throw new AuthRequiredError("Vertex login required. Add an Express Mode API key.");
+      throw new AuthRequiredError("All Vertex keys are disabled. Enable one in the dashboard.");
     }
-    if (!accounts.length) throw new AuthRequiredError("Vertex login required. Add an Express Mode API key.");
-    throw new AuthRequiredError("All Vertex keys are disabled. Enable one in the dashboard.");
+    const minBusy = Math.min(...pool.map((item) => this.inFlightOf(item)));
+    if (usable(current) && this.inFlightOf(current) <= minBusy) return current;
+    const next = pool
+      .slice()
+      .sort((a, b) => this.inFlightOf(a) - this.inFlightOf(b) || (a.last_used || 0) - (b.last_used || 0))[0];
+    if (!current || accountIdOf(next) !== accountIdOf(current)) this.store.use(accountIdOf(next));
+    return next;
   }
 
   async readyBundle({ exclude = [] } = {}) {
@@ -292,7 +316,7 @@ export class VertexClient {
     }), { activate: false });
     const next = this.accounts()
       .filter((item) => vertexApiKeyOf(item) && !isManuallyDisabled(item) && accountIdOf(item) !== failedId)
-      .sort((a, b) => (a.last_used || 0) - (b.last_used || 0))[0];
+      .sort((a, b) => this.inFlightOf(a) - this.inFlightOf(b) || (a.last_used || 0) - (b.last_used || 0))[0];
     if (next) {
       this.store.use(accountIdOf(next));
       this.rememberCatalog({ models: loadStaticVertexCatalog(), source: "express" });
@@ -355,27 +379,40 @@ export class VertexClient {
         const id = accountIdOf(bundle);
         if (tried.has(id)) break;
         tried.add(id);
+        const releaseSlot = this.acquireSlot(bundle);
         const target = this.rewriteUrl(url, bundle);
         let response;
         try {
           response = await this.send(target, payload, bundle, { stream });
         } catch (err) {
+          releaseSlot();
           lastError = err;
           this.recordUsage(bundle, { ok: false });
           if (isRetryableUpstreamError(err) && this.markFailed(bundle, err)) continue;
           if (isRetryableUpstreamError(err) && pass + 1 < maxPasses) break;
           throw err;
         }
-        if (response.status < 400) return response;
+        if (response.status < 400) {
+          response.bundle = bundle;
+          response.releaseSlot = releaseSlot;
+          if (!stream) releaseSlot();
+          return response;
+        }
         if (stream && response.stream) {
           const chunks = [];
-          for await (const chunk of response.stream) chunks.push(chunk);
+          try {
+            for await (const chunk of response.stream) chunks.push(chunk);
+          } finally {
+            releaseSlot();
+          }
           response.body = Buffer.concat(chunks).toString("utf8");
           try {
             response.parsed = JSON.parse(response.body);
           } catch {
             response.parsed = undefined;
           }
+        } else {
+          releaseSlot();
         }
         try {
           this.raiseUpstream(response);
@@ -466,6 +503,10 @@ export class VertexClient {
     if (!refresh && cached.length && now - (this.modelsCache.at || 0) < this.modelsTtlMs) {
       return cached;
     }
+    if (!refresh && cached.length) {
+      this.refreshLiveModels().catch(() => {});
+      return cached;
+    }
     return this.refreshLiveModels();
   }
 
@@ -497,13 +538,19 @@ export class VertexClient {
   }
 
   async refreshLiveModels() {
-    try {
-      const bundle = this.requireBundle();
-      const models = await this.listAllPublisherModels(bundle);
-      return this.rememberCatalog({ models, source: "live" });
-    } catch (err) {
-      return this.rememberCatalog({ models: loadStaticVertexCatalog(), error: err, source: "express" });
-    }
+    if (this.catalogPromise) return this.catalogPromise;
+    this.catalogPromise = (async () => {
+      try {
+        const bundle = this.requireBundle();
+        const models = await this.listAllPublisherModels(bundle);
+        return this.rememberCatalog({ models, source: "live" });
+      } catch (err) {
+        return this.rememberCatalog({ models: loadStaticVertexCatalog(), error: err, source: "express" });
+      } finally {
+        this.catalogPromise = null;
+      }
+    })();
+    return this.catalogPromise;
   }
 
   async resolveRequestModel(body) {
@@ -567,66 +614,71 @@ export class VertexClient {
     }));
   }
 
-  async generate(wrapped) {
-    const bundle = this.requireBundle();
+  async generate(wrapped, { onBundle } = {}) {
     const body = vertexHttpBody(wrapped);
     if (this.settings.debugRequests) {
       console.log(`[vertex] generate ${wrapped.model} last=${body.contents?.at?.(-1)?.role} turns=${this.describeContents(body.contents).map((t) => `${t.role}:${t.parts.map((p) => Object.keys(p)[0]).join("+")}`).join(",")}`);
     }
-    const response = await this.post(this.generateUrl(wrapped.model, bundle), body);
+    const response = await this.post(this.generateUrl(wrapped.model), body);
+    onBundle?.(response.bundle);
     return response.body ? JSON.parse(response.body) : {};
   }
 
-  async *stream(wrapped) {
-    const bundle = this.requireBundle();
+  async *stream(wrapped, { onBundle } = {}) {
     const body = vertexHttpBody(wrapped);
     if (this.settings.debugRequests) {
       console.log(`[vertex] stream ${wrapped.model} last=${body.contents?.at?.(-1)?.role} turns=${this.describeContents(body.contents).map((t) => `${t.role}:${t.parts.map((p) => Object.keys(p)[0]).join("+")}`).join(",")}`);
     }
-    const response = await this.post(this.streamUrl(wrapped.model, bundle), body, { stream: true });
+    const response = await this.post(this.streamUrl(wrapped.model), body, { stream: true });
+    onBundle?.(response.bundle);
     try {
       for await (const event of iterateSse(response.stream)) yield event;
     } finally {
+      response.releaseSlot?.();
       response.stream?.resume();
     }
   }
 
   async chatCompletions(body) {
     const resolved = await this.resolveRequestModel(body);
-    const payload = await this.generate(openaiToVertex(body, resolved));
+    let usedBundle = null;
+    const payload = await this.generate(openaiToVertex(body, resolved), { onBundle: (b) => { usedBundle = b; } });
     const out = geminiToOpenai(payload, resolved.model);
-    this.recordUsage(this.store.load(), { ok: true, prompt: out.usage?.prompt_tokens, completion: out.usage?.completion_tokens });
+    this.recordUsage(usedBundle || this.store.load(), { ok: true, prompt: out.usage?.prompt_tokens, completion: out.usage?.completion_tokens });
     return out;
   }
 
   async *chatCompletionsStream(body) {
     const resolved = await this.resolveRequestModel(body);
     const acc = new StreamAccumulator(resolved.model);
-    for await (const event of this.stream(openaiToVertex(body, resolved))) {
+    let usedBundle = null;
+    for await (const event of this.stream(openaiToVertex(body, resolved), { onBundle: (b) => { usedBundle = b; } })) {
       for (const chunk of acc.ingest(event)) yield `data: ${JSON.stringify(chunk)}\n\n`;
     }
     for (const chunk of acc.finish()) yield `data: ${JSON.stringify(chunk)}\n\n`;
-    this.recordUsage(this.store.load(), { ok: true, prompt: acc.usage?.prompt_tokens, completion: acc.usage?.completion_tokens });
+    this.recordUsage(usedBundle || this.store.load(), { ok: true, prompt: acc.usage?.prompt_tokens, completion: acc.usage?.completion_tokens });
     yield "data: [DONE]\n\n";
   }
 
   async messages(body) {
     const resolved = await this.resolveRequestModel(body);
-    const payload = await this.generate(anthropicToVertex(body, resolved));
+    let usedBundle = null;
+    const payload = await this.generate(anthropicToVertex(body, resolved), { onBundle: (b) => { usedBundle = b; } });
     const out = geminiToAnthropic(payload, resolved.model);
-    this.recordUsage(this.store.load(), { ok: true, prompt: out.usage?.input_tokens, completion: out.usage?.output_tokens });
+    this.recordUsage(usedBundle || this.store.load(), { ok: true, prompt: out.usage?.input_tokens, completion: out.usage?.output_tokens });
     return out;
   }
 
   async *messagesStream(body) {
     const resolved = await this.resolveRequestModel(body);
     const wrapped = anthropicToVertex(body, resolved);
+    let usedBundle = null;
     const acc = yield* streamAnthropicMessages({
-      open: () => this.stream(wrapped),
+      open: () => this.stream(wrapped, { onBundle: (b) => { usedBundle = b; } }),
       makeAccumulator: () => new AnthropicStreamAccumulator(resolved.model),
       log: (msg) => console.warn(`[vertex] ${resolved.model}: ${msg}`),
     });
-    this.recordUsage(this.store.load(), { ok: true, prompt: acc.usage?.input_tokens, completion: acc.usage?.output_tokens });
+    this.recordUsage(usedBundle || this.store.load(), { ok: true, prompt: acc.usage?.input_tokens, completion: acc.usage?.output_tokens });
   }
 
   async responses(body) {

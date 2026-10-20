@@ -511,3 +511,67 @@ test("vertex skips a manually disabled key and never reports all-keys-limited wh
   }
 });
 
+test("vertex spreads concurrent requests across idle enabled keys instead of stacking on one", async () => {
+  const dir = tempDir();
+  const seen = [];
+  let releaseFirst;
+  const firstEntered = new Promise((resolve) => {
+    releaseFirst = resolve;
+  });
+  let unblockFirst;
+  const holdFirst = new Promise((resolve) => {
+    unblockFirst = resolve;
+  });
+  const up = await mockServer(async ({ req, url, res }) => {
+    const key = req.headers["x-goog-api-key"];
+    seen.push({ key, path: url.pathname });
+    if (key === "AQ.first") {
+      releaseFirst();
+      await holdFirst;
+    }
+    sendJson(res, 200, {
+      candidates: [{ content: { parts: [{ text: `ok:${key}` }] }, finishReason: "STOP" }],
+    });
+  });
+  const tokenPath = path.join(dir, "vertex-tokens.db");
+  const store = new TokenStore(tokenPath);
+  store.save(createVertexBundle({
+    api_key: "AQ.first",
+    label: "cpt",
+    email: "cpt",
+    project_id: "project-one",
+  }));
+  store.save(createVertexBundle({
+    api_key: "AQ.second",
+    label: "cpt.brb.jfq",
+    email: "cpt.brb.jfq",
+    project_id: "project-two",
+  }));
+  store.use("cpt");
+  const vertex = new VertexClient(testSettings(dir, {
+    vertexTokenPath: tokenPath,
+    vertexBaseUrl: up.url,
+    liveModels: false,
+  }));
+  try {
+    const req1 = vertex.chatCompletions({
+      model: "vertex/gemini-4-argon",
+      messages: [{ role: "user", content: "window 1" }],
+    });
+    await firstEntered;
+    const req2 = await vertex.chatCompletions({
+      model: "vertex/gemini-4-argon",
+      messages: [{ role: "user", content: "window 2" }],
+    });
+    unblockFirst();
+    const out1 = await req1;
+    assert.equal(out1.choices[0].message.content, "ok:AQ.first");
+    assert.equal(req2.choices[0].message.content, "ok:AQ.second");
+    assert.deepEqual(seen.map((item) => item.key), ["AQ.first", "AQ.second"]);
+    assert.match(seen[0].path, /\/projects\/project-one\//);
+    assert.match(seen[1].path, /\/projects\/project-two\//);
+  } finally {
+    await up.close();
+  }
+});
+

@@ -1,18 +1,23 @@
 import http from "node:http";
 import https from "node:https";
 
+const HTTP_AGENT = new http.Agent({ keepAlive: true, maxSockets: 64, maxFreeSockets: 16 });
+const HTTPS_AGENT = new https.Agent({ keepAlive: true, maxSockets: 64, maxFreeSockets: 16 });
+
 function requestOnce(url, { method = "GET", headers = {}, body, timeoutMs = 30_000, stream = false } = {}) {
   return new Promise((resolve, reject) => {
     const parsed = new URL(url);
-    const lib = parsed.protocol === "http:" ? http : https;
+    const isHttp = parsed.protocol === "http:";
+    const lib = isHttp ? http : https;
     const req = lib.request(
       {
         protocol: parsed.protocol,
         hostname: parsed.hostname,
-        port: parsed.port || (parsed.protocol === "http:" ? 80 : 443),
+        port: parsed.port || (isHttp ? 80 : 443),
         path: `${parsed.pathname}${parsed.search}`,
         method,
         headers,
+        agent: isHttp ? HTTP_AGENT : HTTPS_AGENT,
       },
       (res) => {
         if (stream) {
