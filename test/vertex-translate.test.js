@@ -215,29 +215,37 @@ test("long multimodal chats preserve all inline images and produce a stable sess
   assert.ok(contents[contents.length - 1].parts.some((p) => p.inlineData));
 });
 
-test("vertex tool requests set VALIDATED functionCallingConfig and recover on MALFORMED_RESPONSE retry", () => {
+test("vertex tool requests use VALIDATED functionCallingConfig only on MALFORMED_RESPONSE retry and keep mid-turn system messages in place", () => {
   const wrapped = anthropicToVertex(
     {
       model: "vertex/gemini-4-argon",
       max_tokens: 1024,
+      system: "top-level system",
       tools: [{ name: "edit_file", description: "edit", input_schema: { type: "object", properties: { path: { type: "string" } } } }],
-      messages: [{ role: "user", content: "update the compare table" }],
+      messages: [
+        { role: "user", content: "update the compare table" },
+        { role: "assistant", content: [{ type: "tool_use", id: "c1", name: "edit_file", input: { path: "a.ts" } }] },
+        { role: "user", content: [{ type: "tool_result", tool_use_id: "c1", content: "ok" }] },
+        { role: "system", content: "reminder after tool result" },
+      ],
     },
     { model: "gemini-4-argon", effort: "high" },
   );
-  assert.deepEqual(wrapped.request.toolConfig, {
-    functionCallingConfig: { mode: "VALIDATED" },
-  });
+  // Default attempt 1 does not force VALIDATED mode (which can cause STOP out=0)
+  assert.equal(wrapped.request.toolConfig, undefined);
+  // Mid-conversation system message stays attached to the last user functionResponse instead of mutating systemInstruction
+  assert.equal(wrapped.request.systemInstruction.parts[0].text, "top-level system");
+  assert.equal(wrapped.request.contents.at(-1).parts[0].functionResponse.response.context, "reminder after tool result");
+
   const retry2 = recoverMalformedVertexRequest(wrapped, { attempt: 2, lastFinish: "MALFORMED_RESPONSE" });
   assert.equal(retry2.request.generationConfig.temperature, undefined);
   assert.equal(retry2.request.generationConfig.thinkingConfig.thinkingLevel, "HIGH");
   const retry3 = recoverMalformedVertexRequest(wrapped, { attempt: 3, lastFinish: "MALFORMED_RESPONSE" });
   assert.equal(retry3.request.generationConfig.thinkingConfig.thinkingLevel, "HIGH");
   assert.deepEqual(retry2.request.toolConfig, {
-    functionCallingConfig: { mode: "AUTO" },
+    functionCallingConfig: { mode: "VALIDATED" },
   });
-  const lastParts = retry2.request.contents.at(-1).parts;
-  assert.ok(lastParts.some((p) => typeof p.text === "string" && p.text.includes("emit valid JSON arguments")));
+  assert.ok(retry2.request.contents.at(-1).parts[0].functionResponse.response.note.includes("valid JSON arguments"));
 });
 
 test("anthropic web_search_20250305 uses Vertex googleSearch grounding and emits server_tool_use + web_search_tool_result", () => {

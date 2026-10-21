@@ -241,10 +241,33 @@ export function openaiMessagesToGemini(messages) {
   for (const message of messages || []) {
     const role = String(message.role || "user").toLowerCase();
     if (role === "system" || role === "developer") {
-      const text = message.content;
-      if (typeof text === "string" && text.trim()) systemBits.push(text);
-      else if (Array.isArray(text)) {
-        for (const part of text) if (part && part.text) systemBits.push(String(part.text));
+      const rawText = message.content;
+      const pieces = [];
+      if (typeof rawText === "string" && rawText.trim()) pieces.push(rawText);
+      else if (Array.isArray(rawText)) {
+        for (const part of rawText) if (part && part.text) pieces.push(String(part.text));
+      }
+      if (!pieces.length) continue;
+      // Only leading system messages belong in systemInstruction. Mid-conversation system
+      // reminders injected by VS Code Copilot after tool_result turns must stay in-place on
+      // the user turn; hoisting them into systemInstruction both invalidates the Vertex
+      // prefix KV-cache and causes Gemini to treat the turn as already answered (STOP, out=0).
+      if (!contents.length) {
+        systemBits.push(...pieces);
+      } else {
+        const textParts = pieces.map((t) => textPart(t));
+        const last = contents[contents.length - 1];
+        if (last && last.role === "user" && Array.isArray(last.parts)) {
+          const frParts = last.parts.filter((p) => p && p.functionResponse);
+          if (frParts.length) {
+            const lastFr = frParts[frParts.length - 1].functionResponse;
+            for (const part of textParts) attachPartToFunctionResponse(lastFr, part);
+          } else {
+            last.parts.push(...textParts);
+          }
+        } else {
+          contents.push({ role: "user", parts: textParts });
+        }
       }
       continue;
     }
@@ -442,12 +465,7 @@ export function wrapGenerate({ model, project, contents, system, generation, too
   if (generation) request.generationConfig = generation;
   const isClaude = String(model).toLowerCase().includes("claude");
   if (tools) {
-    const sanitized = sanitizeTools(tools, { jsonSchema: isClaude });
-    request.tools = sanitized;
-    const hasFunctionDeclarations = Array.isArray(sanitized) && sanitized.some((t) => t?.functionDeclarations?.length);
-    if (!isClaude && hasFunctionDeclarations) {
-      request.toolConfig = { functionCallingConfig: { mode: "VALIDATED" } };
-    }
+    request.tools = sanitizeTools(tools, { jsonSchema: isClaude });
   }
   if (sessionId) request.sessionId = sessionId;
   return {
@@ -465,21 +483,37 @@ export function recoverMalformedRequest(wrapped, { attempt = 2, lastFinish = "" 
   const req = wrapped.request || {};
   const nextReq = { ...req };
   const hasFunctionDeclarations = Array.isArray(req.tools) && req.tools.some((t) => t?.functionDeclarations?.length);
-  if (hasFunctionDeclarations && !String(wrapped.model).toLowerCase().includes("claude")) {
+  const isMalformed = /MALFORMED/i.test(String(lastFinish || ""));
+  if (hasFunctionDeclarations && isMalformed && !String(wrapped.model).toLowerCase().includes("claude")) {
     nextReq.toolConfig = {
-      functionCallingConfig: { mode: attempt % 2 === 0 ? "AUTO" : "VALIDATED" },
+      functionCallingConfig: { mode: attempt % 2 === 0 ? "VALIDATED" : "AUTO" },
     };
   }
-  if (/MALFORMED/i.test(String(lastFinish || "")) && Array.isArray(req.contents) && req.contents.length) {
+  if (Array.isArray(req.contents) && req.contents.length) {
+    const hint = isMalformed
+      ? "Emit valid JSON arguments for any tool call, or reply with concise text before calling tools."
+      : "Continue based on the tool results above and provide the next tool call or response.";
     const contents = req.contents.map((turn, idx) => {
       if (idx !== req.contents.length - 1 || turn?.role !== "user" || !Array.isArray(turn.parts)) return turn;
-      if (turn.parts.some((p) => p?.functionResponse)) return turn;
+      const frParts = turn.parts.filter((p) => p?.functionResponse);
+      if (frParts.length) {
+        const lastIdx = turn.parts.length - 1;
+        return {
+          ...turn,
+          parts: turn.parts.map((part, pIdx) => {
+            if (pIdx !== lastIdx || !part?.functionResponse) return part;
+            const fr = part.functionResponse;
+            const respObj = fr.response && typeof fr.response === "object" && !Array.isArray(fr.response)
+              ? { ...fr.response }
+              : { result: fr.response ?? "" };
+            respObj.note = hint;
+            return { ...part, functionResponse: { ...fr, response: respObj } };
+          }),
+        };
+      }
       return {
         ...turn,
-        parts: [
-          ...turn.parts,
-          { text: "\n(Important: emit valid JSON arguments for any tool call, or reply with concise text before calling tools.)" },
-        ],
+        parts: [...turn.parts, { text: `\n(${hint})` }],
       };
     });
     nextReq.contents = contents;

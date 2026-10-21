@@ -392,20 +392,8 @@ export function wrapVertexGenerate({ model, contents, system, generation, tools,
   const request = { contents: safeContents };
   if (system) request.systemInstruction = system;
   if (generation && Object.keys(generation).length) request.generationConfig = generation;
-  if (tools) {
-    request.tools = tools;
-    const hasFunctionDeclarations = Array.isArray(tools) && tools.some((t) => t?.functionDeclarations?.length);
-    if (hasFunctionDeclarations) {
-      // Per Google's Vertex AI FunctionCallingConfig spec (libs/js-genai/src/types.ts),
-      // mode: "VALIDATED" constrains the model to schema-valid function calls or natural language,
-      // preventing MALFORMED_RESPONSE / MALFORMED_FUNCTION_CALL on large contexts with 70+ tools.
-      request.toolConfig = toolConfig || { functionCallingConfig: { mode: "VALIDATED" } };
-    } else if (toolConfig) {
-      request.toolConfig = toolConfig;
-    }
-  } else if (toolConfig) {
-    request.toolConfig = toolConfig;
-  }
+  if (tools) request.tools = tools;
+  if (toolConfig) request.toolConfig = toolConfig;
   return { model, sessionKey: sessionKeyFromRequest(request), request };
 }
 
@@ -414,22 +402,38 @@ export function recoverMalformedVertexRequest(wrapped, { attempt = 2, lastFinish
   const req = wrapped.request || {};
   const nextReq = { ...req };
   const hasFunctionDeclarations = Array.isArray(req.tools) && req.tools.some((t) => t?.functionDeclarations?.length);
-  if (hasFunctionDeclarations) {
-    // Switch between AUTO and VALIDATED and nudge the final turn so the model emits a clean call.
+  const isMalformed = /MALFORMED/i.test(String(lastFinish || ""));
+  if (hasFunctionDeclarations && isMalformed) {
+    // Only apply VALIDATED mode when recovering from a malformed tool call.
     nextReq.toolConfig = {
-      functionCallingConfig: { mode: attempt % 2 === 0 ? "AUTO" : "VALIDATED" },
+      functionCallingConfig: { mode: attempt % 2 === 0 ? "VALIDATED" : "AUTO" },
     };
   }
-  if (/MALFORMED/i.test(String(lastFinish || "")) && Array.isArray(req.contents) && req.contents.length) {
+  if (Array.isArray(req.contents) && req.contents.length) {
+    const hint = isMalformed
+      ? "Emit valid JSON arguments for any tool call, or reply with concise text before calling tools."
+      : "Continue based on the tool results above and provide the next tool call or response.";
     const contents = req.contents.map((turn, idx) => {
       if (idx !== req.contents.length - 1 || turn?.role !== "user" || !Array.isArray(turn.parts)) return turn;
-      if (turn.parts.some((p) => p?.functionResponse)) return turn;
+      const frParts = turn.parts.filter((p) => p?.functionResponse);
+      if (frParts.length) {
+        const lastIdx = turn.parts.length - 1;
+        return {
+          ...turn,
+          parts: turn.parts.map((part, pIdx) => {
+            if (pIdx !== lastIdx || !part?.functionResponse) return part;
+            const fr = part.functionResponse;
+            const respObj = fr.response && typeof fr.response === "object" && !Array.isArray(fr.response)
+              ? { ...fr.response }
+              : { result: fr.response ?? "" };
+            respObj.note = hint;
+            return { ...part, functionResponse: { ...fr, response: respObj } };
+          }),
+        };
+      }
       return {
         ...turn,
-        parts: [
-          ...turn.parts,
-          { text: "\n(Important: emit valid JSON arguments for any tool call, or reply with concise text before calling tools.)" },
-        ],
+        parts: [...turn.parts, { text: `\n(${hint})` }],
       };
     });
     nextReq.contents = contents;
