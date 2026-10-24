@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { isTransientStreamError, streamAnthropicMessages } from "../src/providers/anthropic-stream.js";
-import { AnthropicStreamAccumulator } from "../src/providers/antigravity/translate.js";
+import { isTransientStreamError, streamAnthropicMessages, streamOpenaiChatCompletions } from "../src/providers/anthropic-stream.js";
+import { AnthropicStreamAccumulator, StreamAccumulator } from "../src/providers/antigravity/translate.js";
 
 const chunk = (parts, finishReason) => ({ response: { candidates: [{ content: { role: "model", parts }, finishReason }] } });
 
@@ -113,3 +113,24 @@ test("transient error classification", () => {
   assert.equal(isTransientStreamError(Object.assign(new Error("x"), { status: 429 })), false);
   assert.equal(isTransientStreamError(new TypeError("cannot read properties of undefined")), false);
 });
+
+test("openai chatCompletionsStream retries empty turns and never emits empty choices", async () => {
+  let call = 0;
+  const opens = [
+    () => events(chunk([], "MALFORMED_RESPONSE")),
+    () => events(chunk([{ text: "recovered choice" }], "STOP")),
+  ];
+  const out = [];
+  for await (const item of streamOpenaiChatCompletions({
+    open: () => opens[Math.min(call++, opens.length - 1)](),
+    makeAccumulator: () => new StreamAccumulator("m"),
+    backoffMs: 1,
+  })) {
+    out.push(item);
+  }
+  const text = out.join("");
+  assert.equal(call, 2);
+  assert.match(text, /"content":"recovered choice"/);
+  assert.match(text, /data: \[DONE\]/);
+});
+

@@ -41,7 +41,7 @@ import {
 } from "./tokens.js";
 import { mergeQuotaViews, parseQuotaSummary, quotasFromLiveModels } from "./quota.js";
 import { ResponseStore } from "./responses-store.js";
-import { streamAnthropicMessages } from "../anthropic-stream.js";
+import { streamAnthropicMessages, streamOpenaiChatCompletions } from "../anthropic-stream.js";
 import {
   StreamAccumulator,
   ResponsesStreamAccumulator,
@@ -741,14 +741,15 @@ export class AntigravityClient {
 
   async *chatCompletionsStream(body) {
     const resolved = await this.resolveRequestModel(body);
-    const acc = new StreamAccumulator(resolved.model);
     const bundle = await this.readyBundle();
-    for await (const event of this.stream(openaiToUpstream(body, resolved))) {
-      for (const chunk of acc.ingest(event)) yield `data: ${JSON.stringify(chunk)}\n\n`;
-    }
-    for (const chunk of acc.finish()) yield `data: ${JSON.stringify(chunk)}\n\n`;
+    const wrapped = openaiToUpstream(body, resolved);
+    const acc = yield* streamOpenaiChatCompletions({
+      open: ({ attempt = 1, lastFinish = null } = {}) =>
+        this.stream(recoverMalformedRequest(wrapped, { attempt, lastFinish })),
+      makeAccumulator: () => new StreamAccumulator(resolved.model),
+      log: (msg) => console.warn(`[antigravity] ${resolved.model}: ${msg}`),
+    });
     this.recordUsage(this.store.load() || bundle, { ok: true, prompt: acc.usage?.prompt_tokens, completion: acc.usage?.completion_tokens });
-    yield "data: [DONE]\n\n";
   }
 
   async messages(body) {

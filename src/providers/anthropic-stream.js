@@ -86,6 +86,54 @@ export function isTransientStreamError(err) {
   return NETWORK_ERROR.test(`${err.code || ""} ${err.message || ""} ${err.cause?.code || ""} ${err.cause?.message || ""}`);
 }
 
+export async function* streamOpenaiChatCompletions({ open, makeAccumulator, maxAttempts = 3, backoffMs = 400, log }) {
+  let acc;
+  let lastFinish = null;
+  for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+    acc = makeAccumulator();
+    let opened = false;
+    try {
+      for await (const event of withIdlePings(open({ attempt, lastFinish }))) {
+        if (event?.__ping) {
+          if (opened) yield ": ping\n\n";
+          continue;
+        }
+        const chunks = acc.ingest(event);
+        if (acc.hasVisibleContent && !opened) {
+          opened = true;
+          for (const item of acc.flushPending()) yield `data: ${JSON.stringify(item)}\n\n`;
+          for (const item of chunks) yield `data: ${JSON.stringify(item)}\n\n`;
+        } else if (opened) {
+          for (const item of chunks) yield `data: ${JSON.stringify(item)}\n\n`;
+        }
+      }
+    } catch (err) {
+      if (opened) {
+        log?.(`openai stream failed after output started: ${err.message}`);
+        for (const item of acc.finish({ error: err })) yield `data: ${JSON.stringify(item)}\n\n`;
+        yield "data: [DONE]\n\n";
+        return acc;
+      }
+      if (attempt < maxAttempts && isTransientStreamError(err)) {
+        log?.(`openai attempt ${attempt}/${maxAttempts} failed before output (${err.message}); retrying`);
+        await sleep(backoffMs * attempt);
+        continue;
+      }
+      throw err;
+    }
+    if (opened) break;
+    lastFinish = acc.upstreamFinish || null;
+    if (attempt < maxAttempts) {
+      log?.(`openai attempt ${attempt}/${maxAttempts} produced no output (upstream finishReason: ${acc.upstreamFinish || "none"}); retrying`);
+      continue;
+    }
+  }
+  for (const item of acc.flushPending()) yield `data: ${JSON.stringify(item)}\n\n`;
+  for (const item of acc.finish()) yield `data: ${JSON.stringify(item)}\n\n`;
+  yield "data: [DONE]\n\n";
+  return acc;
+}
+
 // Usage: const acc = yield* streamAnthropicMessages({ open, makeAccumulator });
 // Returns the accumulator of the attempt that was delivered, so callers can record usage.
 //
@@ -105,7 +153,7 @@ export async function* streamAnthropicMessages({ open, makeAccumulator, maxAttem
     try {
       for await (const event of withIdlePings(open({ attempt, lastFinish }))) {
         if (event?.__ping) {
-          yield formatSse("ping", { type: "ping" });
+          if (opened) yield formatSse("ping", { type: "ping" });
           continue;
         }
         for (const item of acc.ingest(event)) {

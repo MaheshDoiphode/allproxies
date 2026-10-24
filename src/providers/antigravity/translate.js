@@ -682,7 +682,13 @@ export function geminiToOpenai(payload, model) {
   const text = partsToText(parts, false);
   const reasoning = partsToText(parts, true);
   const tools = partsToToolCalls(parts);
-  const message = { role: "assistant", content: text || null };
+  const upFinish = String(first.finishReason || "").toUpperCase();
+  const visibleContent = text.trim()
+    ? text
+    : tools.length
+      ? null
+      : (upFinish === "STOP" && reasoning.trim()) || emptyResponseNotice(upFinish);
+  const message = { role: "assistant", content: visibleContent };
   if (tools.length) message.tool_calls = tools;
   if (reasoning) message.reasoning_content = reasoning;
   return {
@@ -984,6 +990,17 @@ export class StreamAccumulator {
     this.emittedRole = false;
     this.toolIndex = 0;
     this.usage = usageFromGemini({});
+    this.upstreamFinish = null;
+    this.finished = false;
+    this.pending = [];
+  }
+
+  get hasVisibleContent() {
+    return Boolean(this.seenText.trim()) || this.toolIndex > 0;
+  }
+
+  flushPending() {
+    return this.pending.splice(0);
   }
 
   ingest(payload) {
@@ -1022,26 +1039,58 @@ export class StreamAccumulator {
     }
     const finish = candidates[0].finishReason;
     if (finish) {
+      this.upstreamFinish = String(finish).toUpperCase();
+      if (this.hasVisibleContent) {
+        this.finished = true;
+        events.push(
+          openaiChunk({
+            model: this.model,
+            completionId: this.completionId,
+            delta: {},
+            finish: finishReason(finish, this.toolIndex > 0),
+            usage: this.usage,
+          }),
+        );
+      }
+    }
+    if (!this.hasVisibleContent) {
+      this.pending.push(...events);
+    }
+    return events;
+  }
+
+  finish({ error } = {}) {
+    const events = [];
+    if (!this.emittedRole) {
+      events.push(openaiChunk({ model: this.model, completionId: this.completionId, delta: { role: "assistant" } }));
+      this.emittedRole = true;
+    }
+    if (error) {
+      const detail = String(error?.message || error).slice(0, 300);
+      const notice = this.hasVisibleContent
+        ? `\n\n[Response interrupted: ${detail}]`
+        : `The upstream request failed before the model answered: ${detail}. Please retry.`;
+      events.push(openaiChunk({ model: this.model, completionId: this.completionId, delta: { content: notice } }));
+      this.seenText += notice;
+    } else if (!this.hasVisibleContent) {
+      const abnormal = this.upstreamFinish && this.upstreamFinish !== "STOP";
+      const notice = (!abnormal && this.seenThoughts.trim()) || emptyResponseNotice(this.upstreamFinish);
+      events.push(openaiChunk({ model: this.model, completionId: this.completionId, delta: { content: notice } }));
+      this.seenText += notice;
+    }
+    if (!this.finished) {
+      this.finished = true;
       events.push(
         openaiChunk({
           model: this.model,
           completionId: this.completionId,
           delta: {},
-          finish: finishReason(finish, this.toolIndex > 0),
+          finish: finishReason(this.upstreamFinish || "STOP", this.toolIndex > 0),
           usage: this.usage,
         }),
       );
     }
     return events;
-  }
-
-  finish() {
-    if (this.emittedRole) return [];
-    return this.ingest({
-      response: {
-        candidates: [{ content: { role: "model", parts: [{ text: "" }] }, finishReason: "STOP" }],
-      },
-    });
   }
 }
 

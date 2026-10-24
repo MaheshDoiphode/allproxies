@@ -13,7 +13,7 @@ import {
 import { AuthRequiredError, HttpError, UpstreamError } from "../../core/errors.js";
 import { iterateSse, request, requestJson } from "../../http/request.js";
 import { ResponseStore } from "../antigravity/responses-store.js";
-import { streamAnthropicMessages } from "../anthropic-stream.js";
+import { streamAnthropicMessages, streamOpenaiChatCompletions } from "../anthropic-stream.js";
 import { loadStaticVertexCatalog, mergeVertexCatalog, nextPageTokenOf, parseVertexModels, resolveVertexRoute } from "./catalog.js";
 import {
   TokenStore,
@@ -730,14 +730,19 @@ export class VertexClient {
 
   async *chatCompletionsStream(body) {
     const resolved = await this.resolveRequestModel(body);
-    const acc = new StreamAccumulator(resolved.model);
+    const wrapped = openaiToVertex(body, resolved);
     let usedBundle = null;
-    for await (const event of this.stream(openaiToVertex(body, resolved), { onBundle: (b) => { usedBundle = b; } })) {
-      for (const chunk of acc.ingest(event)) yield `data: ${JSON.stringify(chunk)}\n\n`;
-    }
-    for (const chunk of acc.finish()) yield `data: ${JSON.stringify(chunk)}\n\n`;
+    const acc = yield* streamOpenaiChatCompletions({
+      open: ({ attempt = 1, lastFinish = null } = {}) =>
+        this.stream(recoverMalformedVertexRequest(wrapped, { attempt, lastFinish }), {
+          onBundle: (b) => {
+            usedBundle = b;
+          },
+        }),
+      makeAccumulator: () => new StreamAccumulator(resolved.model),
+      log: (msg) => console.warn(`[vertex] ${resolved.model}: ${msg}`),
+    });
     this.recordUsage(usedBundle || this.store.load(), { ok: true, prompt: acc.usage?.prompt_tokens, completion: acc.usage?.completion_tokens });
-    yield "data: [DONE]\n\n";
   }
 
   async messages(body) {
