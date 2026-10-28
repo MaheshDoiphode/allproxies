@@ -1,5 +1,6 @@
 import crypto from "node:crypto";
 import {
+  VERTEX_API_CLIENT_HEADER,
   VERTEX_API_KEY_HEADER,
   VERTEX_API_VERSION,
   VERTEX_USER_AGENT,
@@ -258,6 +259,7 @@ export class VertexClient {
   headers(bundle) {
     return {
       [VERTEX_API_KEY_HEADER]: vertexApiKeyOf(bundle),
+      [VERTEX_API_CLIENT_HEADER]: VERTEX_USER_AGENT,
       Accept: "application/json",
       "Content-Type": "application/json",
       "User-Agent": VERTEX_USER_AGENT,
@@ -478,10 +480,13 @@ export class VertexClient {
         }
       }
       if (!lastError || !isRetryableUpstreamError(lastError) || pass + 1 >= maxPasses) break;
-      // Exponential backoff per Google's js-genai SDK (2s, 4s, 8s, 15s, 15s, 20s -> ~64s total) so a
-      // 60-second Vertex TPM/RPM window resets instead of failing the turn with 429.
+      // Match Google's js-genai SDK ApiClient (`p-retry` with `DEFAULT_RETRY_ATTEMPTS = 5`,
+      // `DEFAULT_RETRY_INITIAL_DELAY = 1.0`, `DEFAULT_RETRY_MAX_DELAY = 60.0`, `expBase = 2`).
+      // Do not loop 7 times on client-side request timeouts (which would stack 10+ minutes of waiting).
+      const isClientTimeout = !lastError.status && /timed out/i.test(String(lastError.message || ""));
+      if (isClientTimeout && pass >= 1) break;
       const expWait = retryDelayMs * (2 ** pass);
-      const waitMs = Math.min(20_000, Math.max(expWait, Number(lastError.retryAfterMs || 0)));
+      const waitMs = Math.min(30_000, Math.max(expWait, Number(lastError.retryAfterMs || 0)));
       if (this.settings.debugRequests) {
         console.warn(`[vertex] pass ${pass + 1}/${maxPasses} exhausted (${lastError.code || lastError.message}); backing off ${waitMs}ms`);
       }
@@ -533,10 +538,14 @@ export class VertexClient {
     const body = JSON.stringify(payload);
     const headers = this.headers(bundle);
     headers["Content-Length"] = Buffer.byteLength(body);
-    // Streaming SSE calls return HTTP 200 headers as soon as Vertex starts emitting chunks; if
-    // headers haven't arrived within 120s on a single attempt, abort and retry so a stalled
-    // Vertex backend never blocks the user for 7-8 minutes.
-    const timeoutMs = stream ? Math.min(this.settings.requestTimeoutMs, 120_000) : this.settings.requestTimeoutMs;
+    // Per Google's js-genai SDK (`libs/js-genai/src/_api_client.ts`), Vertex bounds unary requests to
+    // 10 min and streaming requests to 20 min on the server; client-side header/body timeouts are
+    // disabled by default so long reasoning / prefill on 250K+ context turns is never killed mid-flight
+    // and resent in a retry loop.
+    const timeoutMs = this.settings.requestTimeoutMs;
+    if (timeoutMs && timeoutMs > 0) {
+      headers["X-Server-Timeout"] = String(Math.ceil(timeoutMs / 1000));
+    }
     return request(url, {
       method: "POST",
       headers,

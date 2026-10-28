@@ -1,7 +1,9 @@
 export const VERTEX_API_VERSION = "v1beta1";
 export const VERTEX_GLOBAL_BASE = "https://aiplatform.googleapis.com";
 export const VERTEX_API_KEY_HEADER = "x-goog-api-key";
-export const VERTEX_USER_AGENT = "allproxies-vertex/0.1";
+export const VERTEX_API_CLIENT_HEADER = "x-goog-api-client";
+export const VERTEX_SDK_VERSION = "2.31.0";
+export const VERTEX_USER_AGENT = `google-genai-sdk/${VERTEX_SDK_VERSION} gl-node/${process.version}`;
 export const VERTEX_PUBLISHER = "google";
 
 export const VERTEX_THINKING_LEVELS = ["MINIMAL", "LOW", "MEDIUM", "HIGH"];

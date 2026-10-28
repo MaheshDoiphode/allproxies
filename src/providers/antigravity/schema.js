@@ -71,16 +71,23 @@ function sanitizeNode(node, options) {
   return sanitizeSchema(node, options);
 }
 
+const GEMINI_TYPES = new Set(["STRING", "NUMBER", "INTEGER", "BOOLEAN", "ARRAY", "OBJECT"]);
+
+function normalizeGeminiType(type) {
+  const upper = String(type || "").toUpperCase();
+  return GEMINI_TYPES.has(upper) ? upper : "TYPE_UNSPECIFIED";
+}
+
 export function sanitizeSchema(node, { jsonSchema = false } = {}) {
   if (Array.isArray(node)) return node.map((item) => (item && typeof item === "object" ? sanitizeSchema(item, { jsonSchema }) : item));
   if (!node || typeof node !== "object") return node;
   let current = node;
   const cleaned = {};
   // Match Google's js-genai processJsonSchema for Gemini `parameters`: collapse 2-element anyOf [T, null]
-  // into nullable: true + T, and flatten type: ["string", "null"] into type: "string", nullable: true.
+  // into nullable: true + T, and flatten type: ["string", "null"] into type: "STRING", nullable: true.
   if (!jsonSchema && Array.isArray(current.anyOf) && current.anyOf.length === 2) {
-    const firstNull = current.anyOf[0] && current.anyOf[0].type === "null";
-    const secondNull = current.anyOf[1] && current.anyOf[1].type === "null";
+    const firstNull = current.anyOf[0] && String(current.anyOf[0].type || "").toLowerCase() === "null";
+    const secondNull = current.anyOf[1] && String(current.anyOf[1].type || "").toLowerCase() === "null";
     if (firstNull || secondNull) {
       cleaned.nullable = true;
       const other = firstNull ? current.anyOf[1] : current.anyOf[0];
@@ -100,15 +107,22 @@ export function sanitizeSchema(node, { jsonSchema = false } = {}) {
   }
   if (!jsonSchema && Array.isArray(cleaned.type)) {
     const types = cleaned.type.filter((t) => typeof t === "string");
-    if (types.includes("null")) cleaned.nullable = true;
-    const nonNull = types.filter((t) => t !== "null");
+    if (types.some((t) => t.toLowerCase() === "null")) cleaned.nullable = true;
+    const nonNull = types.filter((t) => t.toLowerCase() !== "null");
     if (nonNull.length === 1) {
-      cleaned.type = nonNull[0];
+      cleaned.type = normalizeGeminiType(nonNull[0]);
     } else if (nonNull.length > 1) {
       delete cleaned.type;
-      cleaned.anyOf = nonNull.map((t) => ({ type: t }));
+      cleaned.anyOf = nonNull.map((t) => ({ type: normalizeGeminiType(t) }));
     } else {
       delete cleaned.type;
+    }
+  } else if (!jsonSchema && typeof cleaned.type === "string") {
+    if (cleaned.type.toLowerCase() === "null") {
+      delete cleaned.type;
+      cleaned.nullable = true;
+    } else {
+      cleaned.type = normalizeGeminiType(cleaned.type);
     }
   }
   if (!jsonSchema && cleaned.type && cleaned.anyOf) {
@@ -128,7 +142,7 @@ export function sanitizeSchema(node, { jsonSchema = false } = {}) {
       }
       const items = [];
       for (const item of cleaned[key]) {
-        if (item && typeof item === "object" && item.type === "null") {
+        if (item && typeof item === "object" && String(item.type || "").toLowerCase() === "null") {
           cleaned.nullable = true;
           continue;
         }
@@ -151,10 +165,12 @@ export function sanitizeSchema(node, { jsonSchema = false } = {}) {
   return cleaned;
 }
 
-function ensureObjectSchema(schema) {
+function ensureObjectSchema(schema, { jsonSchema = false } = {}) {
   const next = schema && typeof schema === "object" && !Array.isArray(schema) ? { ...schema } : {};
   if (!next.type || String(next.type).toLowerCase() !== "object") {
-    next.type = "object";
+    next.type = jsonSchema ? "object" : "OBJECT";
+  } else if (!jsonSchema) {
+    next.type = "OBJECT";
   }
   if (!next.properties || typeof next.properties !== "object" || Array.isArray(next.properties)) {
     next.properties = {};
@@ -179,7 +195,7 @@ function cleanDeclaration(decl, { jsonSchema = false } = {}) {
         }
       : {}
   );
-  const cleaned = ensureObjectSchema(rawParams && typeof rawParams === "object" ? sanitizeSchema(rawParams, { jsonSchema }) : {});
+  const cleaned = ensureObjectSchema(rawParams && typeof rawParams === "object" ? sanitizeSchema(rawParams, { jsonSchema }) : {}, { jsonSchema });
   const base = {
     name: sanitizeToolName(String(decl.name || (isAnthropicWebSearch ? "web_search" : "tool"))),
     description: String(decl.description || (isAnthropicWebSearch ? "Search the web for current information." : "")),

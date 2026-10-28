@@ -92,7 +92,7 @@ export async function requestJson(url, { method = "GET", headers = {}, json, for
   return { ...response, parsed };
 }
 
-export async function* iterateSse(readable, { onFirstBytes, firstByteTimeoutMs = 90_000, idleTimeoutMs = 120_000 } = {}) {
+export async function* iterateSse(readable, { onFirstBytes, firstByteTimeoutMs = 300_000, idleTimeoutMs = 300_000 } = {}) {
   let buffer = "";
   let sawBytes = false;
   let timer = null;
@@ -106,6 +106,25 @@ export async function* iterateSse(readable, { onFirstBytes, firstByteTimeoutMs =
     }, ms);
     timer.unref?.();
   };
+  const checkStreamError = (parsed) => {
+    if (
+      parsed &&
+      typeof parsed === "object" &&
+      parsed.error &&
+      typeof parsed.error === "object" &&
+      typeof parsed.error.code === "number" &&
+      parsed.error.code >= 400 &&
+      parsed.error.code < 600
+    ) {
+      const status = parsed.error.code;
+      const code = parsed.error.status ? String(parsed.error.status) : undefined;
+      const msg = parsed.error.message ? String(parsed.error.message) : `got status: ${code || status}`;
+      const err = new Error(msg);
+      err.status = status;
+      if (code) err.code = code;
+      throw err;
+    }
+  };
   const flush = function* (chunk) {
     const text = Buffer.isBuffer(chunk) ? chunk.toString("utf8") : String(chunk);
     if (!sawBytes) {
@@ -115,27 +134,29 @@ export async function* iterateSse(readable, { onFirstBytes, firstByteTimeoutMs =
     armTimer(idleTimeoutMs, "idle");
     buffer += text;
     let sep;
-    while ((sep = buffer.search(/\r?\n\r?\n/)) >= 0) {
+    while ((sep = buffer.search(/\r?\n\r?\n|\r\r/)) >= 0) {
       const raw = buffer.slice(0, sep);
-      const match = buffer.slice(sep).match(/^\r?\n\r?\n/);
+      const match = buffer.slice(sep).match(/^(?:\r?\n\r?\n|\r\r)/);
       buffer = buffer.slice(sep + (match ? match[0].length : 2));
       let eventName = "message";
       const dataLines = [];
-      for (const line of raw.split(/\r?\n/)) {
+      for (const line of raw.split(/\r?\n|\r/)) {
         if (line.startsWith("event:")) eventName = line.slice(6).trim();
         else if (line.startsWith("data:")) dataLines.push(line.slice(5).trimStart());
       }
       const data = dataLines.join("\n");
       if (!data || data === "[DONE]") continue;
+      let parsed;
       try {
-        const parsed = JSON.parse(data);
-        if (parsed && typeof parsed === "object" && !parsed.type && eventName && eventName !== "message") {
-          parsed.type = eventName;
-        }
-        yield parsed;
+        parsed = JSON.parse(data);
       } catch {
-        // ignore malformed SSE frames
+        continue;
       }
+      checkStreamError(parsed);
+      if (parsed && typeof parsed === "object" && !parsed.type && eventName && eventName !== "message") {
+        parsed.type = eventName;
+      }
+      yield parsed;
     }
   };
   armTimer(firstByteTimeoutMs, "waiting for first byte");

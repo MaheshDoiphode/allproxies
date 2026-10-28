@@ -4,6 +4,42 @@ import { sanitizeSchema, sanitizeTools } from "./schema.js";
 
 const SKIP_THOUGHT_SIGNATURE = "skip_thought_signature_validator";
 
+// Preserves real Vertex/Gemini `Part` state (`thought` text + opaque base64 `thoughtSignature`)
+// keyed by `functionCall.id`. VS Code Copilot strips `thinking` blocks from historical `assistant`
+// turns when sending `/v1/messages` or `/v1/chat/completions`, which otherwise forces the proxy
+// to fall back to `skip_thought_signature_validator` on every prior `functionCall` turn and makes
+// Gemini 3/4 re-reason over 200K+ tokens of tool history from scratch.
+const CALL_THOUGHT_CACHE = new Map();
+const MAX_CALL_THOUGHT_CACHE = 4096;
+
+export function rememberToolCallState(callId, { thoughtSignature, thoughtText } = {}) {
+  const key = String(callId || "").trim();
+  if (!key || (!thoughtSignature && !thoughtText)) return;
+  const existing = CALL_THOUGHT_CACHE.get(key) || {};
+  const nextSig =
+    thoughtSignature && thoughtSignature !== SKIP_THOUGHT_SIGNATURE
+      ? thoughtSignature
+      : existing.thoughtSignature || null;
+  const nextThought = thoughtText || existing.thoughtText || "";
+  if (!nextSig && !nextThought) return;
+  if (CALL_THOUGHT_CACHE.size >= MAX_CALL_THOUGHT_CACHE && !CALL_THOUGHT_CACHE.has(key)) {
+    const oldest = CALL_THOUGHT_CACHE.keys().next().value;
+    if (oldest) CALL_THOUGHT_CACHE.delete(oldest);
+  }
+  CALL_THOUGHT_CACHE.delete(key);
+  CALL_THOUGHT_CACHE.set(key, {
+    thoughtSignature: nextSig,
+    thoughtText: nextThought,
+    at: Date.now(),
+  });
+}
+
+export function recallToolCallState(callId) {
+  const key = String(callId || "").trim();
+  if (!key) return null;
+  return CALL_THOUGHT_CACHE.get(key) || null;
+}
+
 export function newRequestId(model) {
   if (String(model).toLowerCase().includes("image")) {
     return `image_gen/${Date.now()}/${crypto.randomUUID()}/12`;
@@ -308,12 +344,25 @@ export function openaiMessagesToGemini(messages) {
 
     const parts = openaiContentToParts(message.content);
     let carriedSignature = null;
+    let hasThoughtPart = false;
     for (const part of parts) {
+      if (part?.thought) hasThoughtPart = true;
       if (part?.thoughtSignature && part.thoughtSignature !== SKIP_THOUGHT_SIGNATURE) {
         carriedSignature = part.thoughtSignature;
       }
     }
-    for (const call of message.tool_calls || []) {
+    const toolCalls = Array.isArray(message.tool_calls) ? message.tool_calls : [];
+    if (!hasThoughtPart && toolCalls.length) {
+      for (const call of toolCalls) {
+        const cached = recallToolCallState(call?.id);
+        if (cached?.thoughtText) {
+          parts.unshift(textPart(cached.thoughtText, true));
+          hasThoughtPart = true;
+          break;
+        }
+      }
+    }
+    for (const call of toolCalls) {
       const fn = call && typeof call === "object" ? call.function : null;
       if (!fn || typeof fn !== "object") continue;
       let args = fn.arguments;
@@ -329,7 +378,13 @@ export function openaiMessagesToGemini(messages) {
       if (callId) pendingCalls[callId] = name;
       const payload = { name, args: args || {} };
       if (callId) payload.id = callId;
-      const sig = call.thoughtSignature || call.thought_signature || carriedSignature || SKIP_THOUGHT_SIGNATURE;
+      const cached = callId ? recallToolCallState(callId) : null;
+      const sig =
+        call.thoughtSignature ||
+        call.thought_signature ||
+        carriedSignature ||
+        cached?.thoughtSignature ||
+        SKIP_THOUGHT_SIGNATURE;
       parts.push({
         functionCall: payload,
         thoughtSignature: sig,
@@ -638,16 +693,23 @@ export function partsToThoughtSignature(parts) {
   return null;
 }
 
-export function partsToToolCalls(parts) {
+export function partsToToolCalls(parts, { thoughtText = "", fallbackSignature = null } = {}) {
   const calls = [];
+  const sigFromParts = partsToThoughtSignature(parts) || fallbackSignature || null;
   (parts || []).forEach((part, index) => {
     if (!part || typeof part !== "object" || !part.functionCall) return;
     const call = part.functionCall || {};
+    // Skip intermediate streaming partialArgs chunks until the full functionCall name is present
+    if (!call.name && (call.partialArgs || call.willContinue)) return;
     const args = call.args && typeof call.args === "object" ? call.args : {};
+    const id = String(call.id || `call_${index}`);
+    const sig = part.thoughtSignature || part.thought_signature || sigFromParts;
+    rememberToolCallState(id, { thoughtSignature: sig, thoughtText });
     calls.push({
-      id: String(call.id || `call_${index}`),
+      id,
       type: "function",
       function: { name: String(call.name || "tool"), arguments: JSON.stringify(args) },
+      ...(sig ? { thoughtSignature: sig } : {}),
     });
   });
   return calls;
@@ -709,7 +771,7 @@ export function geminiToOpenai(payload, model) {
   const parts = first.content?.parts || [];
   const text = partsToText(parts, false);
   const reasoning = partsToText(parts, true);
-  const tools = partsToToolCalls(parts);
+  const tools = partsToToolCalls(parts, { thoughtText: reasoning });
   const upFinish = String(first.finishReason || "").toUpperCase();
   const visibleContent = text.trim()
     ? text
@@ -773,7 +835,7 @@ export function geminiToAnthropic(payload, model) {
   content.push(...groundingToAnthropicWebSearchBlocks(first.groundingMetadata));
   const text = partsToText(parts, false);
   if (text) content.push({ type: "text", text });
-  for (const call of partsToToolCalls(parts)) {
+  for (const call of partsToToolCalls(parts, { thoughtText: reasoning, fallbackSignature: sig })) {
     content.push({
       type: "tool_use",
       id: call.id,
@@ -948,7 +1010,7 @@ export class AnthropicStreamAccumulator {
       this.seenText = text;
     }
     const seenCallIds = this.seenCallIds;
-    for (const call of partsToToolCalls(parts)) {
+    for (const call of partsToToolCalls(parts, { thoughtText: this.seenThoughts, fallbackSignature: this.thoughtSignature })) {
       if (seenCallIds.has(call.id)) continue;
       this.closeThinking(events);
       seenCallIds.add(call.id);
@@ -1067,7 +1129,7 @@ export class StreamAccumulator {
       events.push(openaiChunk({ model: this.model, completionId: this.completionId, delta: { content: extraText } }));
       this.seenText = text;
     }
-    for (const call of partsToToolCalls(parts)) {
+    for (const call of partsToToolCalls(parts, { thoughtText: this.seenThoughts })) {
       events.push(
         openaiChunk({
           model: this.model,

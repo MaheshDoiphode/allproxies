@@ -369,7 +369,30 @@ test("vertex real thoughtSignature round-trips through Anthropic thinking blocks
   assert.equal(modelTurn.parts[1].thoughtSignature, "CoADAePx/realVertexSig==");
 
   const endLineSchema = nextTurn.request.tools[0].functionDeclarations[0].parameters.properties.endLine;
-  assert.deepEqual(endLineSchema, { type: "number", nullable: true });
+  assert.deepEqual(endLineSchema, { type: "NUMBER", nullable: true });
+
+  // Even when VS Code Copilot strips the `thinking` block from historical assistant messages and only
+  // sends `assistant[tool_use]`, the proxy restores the cached `thought` part and real `thoughtSignature`
+  // from `call_1` so Vertex never has to recompute reasoning over long tool histories.
+  const strippedTurn = anthropicToVertex(
+    {
+      model: "vertex/gemini-4-argon",
+      messages: [
+        { role: "user", content: "read Section1.tsx" },
+        {
+          role: "assistant",
+          content: [{ type: "tool_use", id: "call_1", name: "read_file", input: { path: "Section1.tsx" } }],
+        },
+        { role: "user", content: [{ type: "tool_result", tool_use_id: "call_1", content: "file contents" }] },
+      ],
+    },
+    { model: "gemini-4-argon" },
+  );
+  const restoredModelTurn = strippedTurn.request.contents.find((c) => c.role === "model");
+  assert.equal(restoredModelTurn.parts[0].thought, true);
+  assert.equal(restoredModelTurn.parts[0].text, "planning the read_file call");
+  assert.equal(restoredModelTurn.parts[1].functionCall.name, "read_file");
+  assert.equal(restoredModelTurn.parts[1].thoughtSignature, "CoADAePx/realVertexSig==");
 });
 
 
