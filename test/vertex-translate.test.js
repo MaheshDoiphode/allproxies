@@ -183,7 +183,7 @@ test("anthropic messages keep thinking budget on 2.5 and map budget to thinkingL
     includeThoughts: true,
     thinkingLevel: "HIGH",
   });
-  assert.equal(argon.request.generationConfig.maxOutputTokens, 128);
+  assert.equal(argon.request.generationConfig.maxOutputTokens, 4096);
 });
 
 test("gemini-4-argon maps thinking and routing properly", () => {
@@ -311,6 +311,67 @@ test("anthropic web_search_20250305 uses Vertex googleSearch grounding and emits
   const delta = events.find((e) => e.type === "message_delta");
   assert.deepEqual(delta.usage.server_tool_use, { web_search_requests: 1 });
 });
+
+test("vertex real thoughtSignature round-trips through Anthropic thinking blocks and nullable anyOf schemas collapse per js-genai", () => {
+  const acc = new AnthropicStreamAccumulator("gemini-4-argon");
+  const streamEvents = [
+    ...acc.ingest({
+      candidates: [
+        {
+          content: {
+            role: "model",
+            parts: [
+              { text: "planning the read_file call", thought: true },
+              { functionCall: { name: "read_file", args: { path: "Section1.tsx" }, id: "call_1" }, thoughtSignature: "CoADAePx/realVertexSig==" },
+            ],
+          },
+          finishReason: "STOP",
+        },
+      ],
+    }),
+    ...acc.finish(),
+  ];
+  const sigDelta = streamEvents.find((e) => e.delta?.type === "signature_delta");
+  assert.equal(sigDelta.delta.signature, "CoADAePx/realVertexSig==");
+
+  const nextTurn = anthropicToVertex(
+    {
+      model: "vertex/gemini-4-argon",
+      tools: [
+        {
+          name: "read_file",
+          description: "read",
+          input_schema: {
+            type: "object",
+            properties: {
+              path: { type: "string" },
+              endLine: { anyOf: [{ type: "number" }, { type: "null" }] },
+            },
+          },
+        },
+      ],
+      messages: [
+        { role: "user", content: "read Section1.tsx" },
+        {
+          role: "assistant",
+          content: [
+            { type: "thinking", thinking: "planning the read_file call", signature: "CoADAePx/realVertexSig==" },
+            { type: "tool_use", id: "call_1", name: "read_file", input: { path: "Section1.tsx" } },
+          ],
+        },
+        { role: "user", content: [{ type: "tool_result", tool_use_id: "call_1", content: "file contents" }] },
+      ],
+    },
+    { model: "gemini-4-argon" },
+  );
+  const modelTurn = nextTurn.request.contents.find((c) => c.role === "model");
+  assert.equal(modelTurn.parts[0].thoughtSignature, "CoADAePx/realVertexSig==");
+  assert.equal(modelTurn.parts[1].thoughtSignature, "CoADAePx/realVertexSig==");
+
+  const endLineSchema = nextTurn.request.tools[0].functionDeclarations[0].parameters.properties.endLine;
+  assert.deepEqual(endLineSchema, { type: "number", nullable: true });
+});
+
 
 
 

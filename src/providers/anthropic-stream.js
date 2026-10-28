@@ -141,7 +141,7 @@ export async function* streamOpenaiChatCompletions({ open, makeAccumulator, maxA
 // Thoughts alone don't count: Gemini often streams thoughts and then ends with MALFORMED_FUNCTION_CALL and
 // no call, and a turn like that can only be retried if the client hasn't seen the thoughts yet. If the
 // model keeps thinking for `holdThoughtsMs`, they are released so long reasoning still streams live.
-export async function* streamAnthropicMessages({ open, makeAccumulator, maxAttempts = 3, backoffMs = 400, holdThoughtsMs = 3_000, log }) {
+export async function* streamAnthropicMessages({ open, makeAccumulator, maxAttempts = 3, backoffMs = 400, holdThoughtsMs = 1_500, log }) {
   let acc;
   let held = [];
   let lastFinish = null;
@@ -151,8 +151,10 @@ export async function* streamAnthropicMessages({ open, makeAccumulator, maxAttem
     let opened = false;
     const startedAt = Date.now();
     try {
-      for await (const event of withIdlePings(open({ attempt, lastFinish }))) {
+      for await (const event of withIdlePings(open({ attempt, lastFinish }), 15_000)) {
         if (event?.__ping) {
+          // Never emit SSE events before `opened === true` — once HTTP 200 SSE headers are sent to VS Code,
+          // we cannot retry or return an HTTP status if the upstream attempt fails or produces no output.
           if (opened) yield formatSse("ping", { type: "ping" });
           continue;
         }
@@ -165,7 +167,7 @@ export async function* streamAnthropicMessages({ open, makeAccumulator, maxAttem
           (acc.hasVisibleContent ||
             (acc.hasContent &&
               !acc.upstreamFinish &&
-              (holdThoughtsMs <= 0 || Date.now() - startedAt >= holdThoughtsMs || acc.seenThoughts.length >= 64)))
+              (holdThoughtsMs <= 0 || Date.now() - startedAt >= holdThoughtsMs || acc.seenThoughts.length >= 24)))
         ) {
           opened = true;
           for (const item of held.splice(0)) yield formatSse(item.type, item);

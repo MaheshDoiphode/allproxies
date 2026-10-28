@@ -92,15 +92,27 @@ export async function requestJson(url, { method = "GET", headers = {}, json, for
   return { ...response, parsed };
 }
 
-export async function* iterateSse(readable, { onFirstBytes } = {}) {
+export async function* iterateSse(readable, { onFirstBytes, firstByteTimeoutMs = 90_000, idleTimeoutMs = 120_000 } = {}) {
   let buffer = "";
   let sawBytes = false;
+  let timer = null;
+  const armTimer = (ms, label) => {
+    if (timer) clearTimeout(timer);
+    if (!ms || ms <= 0) return;
+    timer = setTimeout(() => {
+      if (readable && !readable.destroyed) {
+        readable.destroy(new Error(`Upstream stream timed out (${label} after ${ms}ms)`));
+      }
+    }, ms);
+    timer.unref?.();
+  };
   const flush = function* (chunk) {
     const text = Buffer.isBuffer(chunk) ? chunk.toString("utf8") : String(chunk);
     if (!sawBytes) {
       sawBytes = true;
       onFirstBytes?.(text);
     }
+    armTimer(idleTimeoutMs, "idle");
     buffer += text;
     let sep;
     while ((sep = buffer.search(/\r?\n\r?\n/)) >= 0) {
@@ -126,10 +138,12 @@ export async function* iterateSse(readable, { onFirstBytes } = {}) {
       }
     }
   };
+  armTimer(firstByteTimeoutMs, "waiting for first byte");
   try {
     for await (const chunk of readable) yield* flush(chunk);
     if (buffer.trim()) yield* flush("\n\n");
   } finally {
+    if (timer) clearTimeout(timer);
     if (readable && !readable.complete && !readable.destroyed) {
       readable.destroy();
     }

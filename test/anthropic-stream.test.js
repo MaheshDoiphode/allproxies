@@ -105,6 +105,19 @@ test("non-transient failures before output still propagate so the HTTP layer can
   );
 });
 
+test("slow upstream failure before output does not emit premature ping SSE events that swallow the HTTP error", async () => {
+  const err = Object.assign(new Error("Resource exhausted"), { status: 429 });
+  await assert.rejects(
+    run([
+      async function* () {
+        await new Promise((r) => setTimeout(r, 20));
+        throw err;
+      },
+    ]),
+    /Resource exhausted/,
+  );
+});
+
 test("transient error classification", () => {
   assert.equal(isTransientStreamError(new Error("read ECONNRESET")), true);
   assert.equal(isTransientStreamError(new Error("Request timed out after 180000ms")), true);

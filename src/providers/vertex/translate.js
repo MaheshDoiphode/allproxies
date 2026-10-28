@@ -323,7 +323,7 @@ function generationFromChat(body, { model, effort } = {}) {
   const thinking = vertexThinkingFromRequest(model, body, effort);
   if (thinking) {
     generation.thinkingConfig = thinking;
-    if (generation.maxOutputTokens != null && thinking.thinkingBudget) {
+    if (generation.maxOutputTokens != null) {
       generation.maxOutputTokens = outputTokenFloor(generation.maxOutputTokens, thinking);
     }
   }
@@ -381,6 +381,10 @@ export function pruneContentsIfTooLarge(contents, maxChars = 3_200_000) {
   while (pruned.length > 2 && totalChars > maxChars) {
     const dropped = pruned.splice(1, 1)[0];
     totalChars -= estimateTurnSize(dropped);
+    if (dropped?.role === "model" && pruned[1]?.role === "user" && pruned.length > 2) {
+      const nextDropped = pruned.splice(1, 1)[0];
+      totalChars -= estimateTurnSize(nextDropped);
+    }
   }
   return normalizeContents(pruned);
 }

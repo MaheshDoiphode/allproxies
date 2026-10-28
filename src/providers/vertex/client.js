@@ -398,7 +398,7 @@ export class VertexClient {
     });
   }
 
-  async post(url, payload, { stream = false, maxPasses = 5, retryDelayMs = 1500, sessionKey = null } = {}) {
+  async post(url, payload, { stream = false, maxPasses = 7, retryDelayMs = 2000, sessionKey = null } = {}) {
     let lastError;
     let recoveredOnce = false;
     for (let pass = 0; pass < maxPasses; pass += 1) {
@@ -423,6 +423,9 @@ export class VertexClient {
           releaseSlot();
           lastError = err;
           this.recordUsage(bundle, { ok: false });
+          if (this.settings.debugRequests) {
+            console.warn(`[vertex] key=${bundle.email || id} error=${err.message}`);
+          }
           if (isRetryableUpstreamError(err) && this.markFailed(bundle, err)) continue;
           if (isRetryableUpstreamError(err) && pass + 1 < maxPasses) break;
           err.retriedUpstream = pass > 0 || tried.size > 1;
@@ -475,10 +478,10 @@ export class VertexClient {
         }
       }
       if (!lastError || !isRetryableUpstreamError(lastError) || pass + 1 >= maxPasses) break;
-      // Exponential backoff per Google's js-genai SDK (1.5s, 3s, 6s, 12s, capped at 30s) so a
+      // Exponential backoff per Google's js-genai SDK (2s, 4s, 8s, 15s, 15s, 20s -> ~64s total) so a
       // 60-second Vertex TPM/RPM window resets instead of failing the turn with 429.
       const expWait = retryDelayMs * (2 ** pass);
-      const waitMs = Math.min(30_000, Math.max(expWait, Number(lastError.retryAfterMs || 0)));
+      const waitMs = Math.min(20_000, Math.max(expWait, Number(lastError.retryAfterMs || 0)));
       if (this.settings.debugRequests) {
         console.warn(`[vertex] pass ${pass + 1}/${maxPasses} exhausted (${lastError.code || lastError.message}); backing off ${waitMs}ms`);
       }
@@ -530,11 +533,15 @@ export class VertexClient {
     const body = JSON.stringify(payload);
     const headers = this.headers(bundle);
     headers["Content-Length"] = Buffer.byteLength(body);
+    // Streaming SSE calls return HTTP 200 headers as soon as Vertex starts emitting chunks; if
+    // headers haven't arrived within 120s on a single attempt, abort and retry so a stalled
+    // Vertex backend never blocks the user for 7-8 minutes.
+    const timeoutMs = stream ? Math.min(this.settings.requestTimeoutMs, 120_000) : this.settings.requestTimeoutMs;
     return request(url, {
       method: "POST",
       headers,
       body,
-      timeoutMs: this.settings.requestTimeoutMs,
+      timeoutMs,
       stream,
     });
   }

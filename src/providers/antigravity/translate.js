@@ -46,9 +46,10 @@ export function thinkingFromRequest(model, body = {}, effort) {
   return null;
 }
 
-function textPart(text, thought = false) {
+function textPart(text, thought = false, thoughtSignature = null) {
   const part = { text };
   if (thought) part.thought = true;
+  if (thoughtSignature && typeof thoughtSignature === "string") part.thoughtSignature = thoughtSignature;
   return part;
 }
 
@@ -97,7 +98,8 @@ export function openaiContentToParts(content) {
     if (["text", "input_text", "output_text"].includes(kind) && item.text) parts.push(textOrEmbeddedImagePart(String(item.text)));
     else if (kind === "thinking" || kind === "reasoning") {
       const thought = item.thinking || item.text || item.reasoning;
-      if (thought) parts.push(textPart(String(thought), true));
+      const sig = typeof item.signature === "string" && item.signature ? item.signature : null;
+      if (thought) parts.push(textPart(String(thought), true, sig));
     }
     else if (kind === "image_url" || kind === "image" || kind === "input_image" || kind === "base64") {
       let url = item.image_url ?? item.url;
@@ -305,6 +307,12 @@ export function openaiMessagesToGemini(messages) {
     }
 
     const parts = openaiContentToParts(message.content);
+    let carriedSignature = null;
+    for (const part of parts) {
+      if (part?.thoughtSignature && part.thoughtSignature !== SKIP_THOUGHT_SIGNATURE) {
+        carriedSignature = part.thoughtSignature;
+      }
+    }
     for (const call of message.tool_calls || []) {
       const fn = call && typeof call === "object" ? call.function : null;
       if (!fn || typeof fn !== "object") continue;
@@ -321,9 +329,10 @@ export function openaiMessagesToGemini(messages) {
       if (callId) pendingCalls[callId] = name;
       const payload = { name, args: args || {} };
       if (callId) payload.id = callId;
+      const sig = call.thoughtSignature || call.thought_signature || carriedSignature || SKIP_THOUGHT_SIGNATURE;
       parts.push({
         functionCall: payload,
-        thoughtSignature: SKIP_THOUGHT_SIGNATURE,
+        thoughtSignature: sig,
       });
     }
     const turnRole = role === "assistant" ? "model" : "user";
@@ -370,7 +379,13 @@ export function anthropicToGemini(body) {
           if (part.text) parts.push({ type: "text", text: part.text });
         } else if (part.type === "thinking" || part.type === "reasoning") {
           const thought = part.thinking || part.text || part.reasoning;
-          if (thought) parts.push({ type: "thinking", thinking: thought });
+          if (thought) {
+            parts.push({
+              type: "thinking",
+              thinking: thought,
+              ...(typeof part.signature === "string" && part.signature ? { signature: part.signature } : {}),
+            });
+          }
         } else if (part.type === "tool_use") {
           toolCalls.push({
             id: part.id,
@@ -454,6 +469,11 @@ export function pruneContentsIfTooLarge(contents, maxChars = 3_200_000) {
   while (pruned.length > 2 && totalChars > maxChars) {
     const dropped = pruned.splice(1, 1)[0];
     totalChars -= estimateTurnSize(dropped);
+    // If we dropped a model turn that had functionCall, also drop its paired user functionResponse turn
+    if (dropped?.role === "model" && pruned[1]?.role === "user" && pruned.length > 2) {
+      const nextDropped = pruned.splice(1, 1)[0];
+      totalChars -= estimateTurnSize(nextDropped);
+    }
   }
   return normalizeContents(pruned);
 }
@@ -610,6 +630,14 @@ export function partsToText(parts, thoughts = false) {
   return chunks.join("");
 }
 
+export function partsToThoughtSignature(parts) {
+  for (let i = (parts || []).length - 1; i >= 0; i -= 1) {
+    const sig = parts[i]?.thoughtSignature || parts[i]?.thought_signature;
+    if (typeof sig === "string" && sig) return sig;
+  }
+  return null;
+}
+
 export function partsToToolCalls(parts) {
   const calls = [];
   (parts || []).forEach((part, index) => {
@@ -740,7 +768,8 @@ export function geminiToAnthropic(payload, model) {
   const parts = first.content?.parts || [];
   const content = [];
   const reasoning = partsToText(parts, true);
-  if (reasoning) content.push({ type: "thinking", thinking: reasoning });
+  const sig = partsToThoughtSignature(parts) || SKIP_THOUGHT_SIGNATURE;
+  if (reasoning) content.push({ type: "thinking", thinking: reasoning, signature: sig });
   content.push(...groundingToAnthropicWebSearchBlocks(first.groundingMetadata));
   const text = partsToText(parts, false);
   if (text) content.push({ type: "text", text });
@@ -798,6 +827,7 @@ export class AnthropicStreamAccumulator {
     this.seenCallIds = new Set();
     this.emittedGrounding = false;
     this.thinkingSignatureSent = false;
+    this.thoughtSignature = null;
     this.thinkClosed = false;
     this.upstreamFinish = null;
   }
@@ -808,7 +838,7 @@ export class AnthropicStreamAccumulator {
       events.push({
         type: "content_block_delta",
         index: this.thinkIndex,
-        delta: { type: "signature_delta", signature: SKIP_THOUGHT_SIGNATURE },
+        delta: { type: "signature_delta", signature: this.thoughtSignature || SKIP_THOUGHT_SIGNATURE },
       });
       this.thinkingSignatureSent = true;
     }
@@ -857,6 +887,8 @@ export class AnthropicStreamAccumulator {
       return [];
     }
     const parts = candidates[0].content?.parts || [];
+    const sig = partsToThoughtSignature(parts);
+    if (sig) this.thoughtSignature = sig;
     const events = [];
     if (!this.started) {
       events.push(...this.start());
