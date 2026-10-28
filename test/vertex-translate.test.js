@@ -22,6 +22,24 @@ test("thinking levels map to Vertex MINIMAL/LOW/MEDIUM/HIGH", () => {
     thinkingLevel: "LOW",
   });
   assert.equal(vertexThinkingFromRequest("gemini-3.8-flash", { thinking: { type: "disabled" } }), null);
+  // Default thinking-capable Vertex models always send includeThoughts: true when not disabled
+  assert.deepEqual(vertexThinkingFromRequest("gemini-4-argon", {}), {
+    includeThoughts: true,
+    thinkingLevel: "HIGH",
+  });
+  assert.deepEqual(vertexThinkingFromRequest("gemini-2.5-pro", {}), {
+    includeThoughts: true,
+  });
+  // output_config.effort overrides thinking: { type: "disabled" }
+  assert.deepEqual(
+    vertexThinkingFromRequest("gemini-4-argon", { thinking: { type: "disabled" }, output_config: { effort: "high" } }),
+    { includeThoughts: true, thinkingLevel: "HIGH" },
+  );
+  // thinking: { type: "enabled" } without budget_tokens still enables thinking + includeThoughts
+  assert.deepEqual(
+    vertexThinkingFromRequest("gemini-4-argon", { thinking: { type: "enabled" } }),
+    { includeThoughts: true, thinkingLevel: "HIGH" },
+  );
 });
 
 test("image input accepts data urls, https, and gs://", () => {

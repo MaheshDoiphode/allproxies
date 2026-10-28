@@ -265,10 +265,15 @@ test("anthropic stream keeps tool_use stop even if Gemini says MAX_TOKENS", () =
 test("anthropic stream signs thinking blocks before stop", () => {
   const acc = new AnthropicStreamAccumulator("m");
   acc.start();
-  acc.ingest({ response: { candidates: [{ content: { parts: [{ text: "plan", thought: true }, { text: "hi" }] } }] } });
+  const mid = acc.ingest({ response: { candidates: [{ content: { parts: [{ text: "plan", thought: true }, { text: "hi" }] } }] } });
   const done = acc.finish();
-  assert.ok(done.some((item) => item.delta?.type === "signature_delta" && item.delta.signature === "skip_thought_signature_validator"));
-  assert.ok(done.some((item) => item.type === "content_block_stop" && item.index === 0));
+  const all = [...mid, ...done];
+  assert.ok(all.some((item) => item.delta?.type === "signature_delta" && item.delta.signature === "skip_thought_signature_validator"));
+  assert.ok(all.some((item) => item.type === "content_block_stop" && item.index === 0));
+  // Thinking block (index 0) must close before text block (index 1) starts
+  const thinkStopIdx = all.findIndex((item) => item.type === "content_block_stop" && item.index === 0);
+  const textStartIdx = all.findIndex((item) => item.type === "content_block_start" && item.index === 1);
+  assert.ok(thinkStopIdx < textStartIdx);
 });
 
 test("claude requests send tool schemas as parametersJsonSchema, gemini keeps parameters", () => {

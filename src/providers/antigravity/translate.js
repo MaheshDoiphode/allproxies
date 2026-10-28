@@ -798,7 +798,22 @@ export class AnthropicStreamAccumulator {
     this.seenCallIds = new Set();
     this.emittedGrounding = false;
     this.thinkingSignatureSent = false;
+    this.thinkClosed = false;
     this.upstreamFinish = null;
+  }
+
+  closeThinking(events) {
+    if (this.thinkIndex == null || this.thinkClosed) return;
+    if (!this.thinkingSignatureSent) {
+      events.push({
+        type: "content_block_delta",
+        index: this.thinkIndex,
+        delta: { type: "signature_delta", signature: SKIP_THOUGHT_SIGNATURE },
+      });
+      this.thinkingSignatureSent = true;
+    }
+    events.push({ type: "content_block_stop", index: this.thinkIndex });
+    this.thinkClosed = true;
   }
 
   get hasContent() {
@@ -861,6 +876,7 @@ export class AnthropicStreamAccumulator {
     if (!this.emittedGrounding && candidates[0].groundingMetadata) {
       const searchBlocks = groundingToAnthropicWebSearchBlocks(candidates[0].groundingMetadata);
       if (searchBlocks.length === 2) {
+        this.closeThinking(events);
         this.emittedGrounding = true;
         this.usage.server_tool_use = { web_search_requests: 1 };
         const [srvUse, srvRes] = searchBlocks;
@@ -890,6 +906,7 @@ export class AnthropicStreamAccumulator {
     const text = partsToText(parts, false);
     const extraText = text.startsWith(this.seenText) ? text.slice(this.seenText.length) : text;
     if (extraText) {
+      this.closeThinking(events);
       if (this.textIndex == null) {
         this.textIndex = this.block;
         events.push({ type: "content_block_start", index: this.textIndex, content_block: { type: "text", text: "" } });
@@ -901,6 +918,7 @@ export class AnthropicStreamAccumulator {
     const seenCallIds = this.seenCallIds;
     for (const call of partsToToolCalls(parts)) {
       if (seenCallIds.has(call.id)) continue;
+      this.closeThinking(events);
       seenCallIds.add(call.id);
       const index = this.block;
       this.block += 1;
@@ -934,17 +952,7 @@ export class AnthropicStreamAccumulator {
   // VS Code maps an Anthropic `error` event to "Sorry, no response was returned." and drops the message.
   finish({ error } = {}) {
     const events = [];
-    if (this.thinkIndex != null) {
-      if (!this.thinkingSignatureSent) {
-        events.push({
-          type: "content_block_delta",
-          index: this.thinkIndex,
-          delta: { type: "signature_delta", signature: SKIP_THOUGHT_SIGNATURE },
-        });
-        this.thinkingSignatureSent = true;
-      }
-      events.push({ type: "content_block_stop", index: this.thinkIndex });
-    }
+    this.closeThinking(events);
     // Whitespace-only text counts as empty: clients treat it as "no response" too.
     const visible = Boolean(this.seenText.trim()) || this.seenCallIds.size > 0;
     let notice = "";

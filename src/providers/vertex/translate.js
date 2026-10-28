@@ -62,6 +62,13 @@ function requestEffort(body = {}, effort) {
   );
 }
 
+function isThinkingVertexModel(model) {
+  const blob = String(model || "").toLowerCase();
+  if (!blob) return false;
+  if (blob.includes("imagen") || blob.includes("veo") || blob.includes("embed") || blob.includes("lite")) return false;
+  return /gemini-2\.5|gemini-3|gemini-4|thinking|deepseek/.test(blob);
+}
+
 export function vertexThinkingFromRequest(model, body = {}, effort) {
   const extras = body.extra_body && typeof body.extra_body === "object" ? body.extra_body : {};
   const thinking = extras.google || extras.thinking || extras.vertex || body.thinking;
@@ -74,7 +81,7 @@ export function vertexThinkingFromRequest(model, body = {}, effort) {
   if (resolved === "none") return null;
   const isGemini3Or4 = /gemini-[34]/i.test(String(model || ""));
   if (thinking && typeof thinking === "object") {
-    if (thinking.type === "disabled" || thinking.type === "none") return null;
+    if ((thinking.type === "disabled" || thinking.type === "none") && !resolved) return null;
     const config = {};
     const level = thinking.thinkingLevel || thinking.thinking_level || thinking.level || thinking.effort;
     const budget = thinking.thinkingBudget ?? thinking.budget_tokens ?? thinking.thinking_budget;
@@ -104,6 +111,10 @@ export function vertexThinkingFromRequest(model, body = {}, effort) {
         config.thinkingBudget = b;
       }
     }
+    if (!config.thinkingLevel && config.thinkingBudget == null && (thinking.type === "enabled" || thinking.type === "adaptive")) {
+      if (isGemini3Or4) config.thinkingLevel = "HIGH";
+      config.includeThoughts = true;
+    }
     if (thinking.includeThoughts != null || thinking.include_thoughts != null) {
       config.includeThoughts = Boolean(thinking.includeThoughts ?? thinking.include_thoughts);
     } else if (Object.keys(config).length && config.includeThoughts == null) {
@@ -113,7 +124,7 @@ export function vertexThinkingFromRequest(model, body = {}, effort) {
   }
   const wire = thinkingLevelWire(resolved);
   if (wire === "MINIMAL") return { includeThoughts: false, thinkingLevel: "LOW" };
-  if (wire) return { includeThoughts: true, thinkingLevel: wire };
+  if (wire) return isGemini3Or4 ? { includeThoughts: true, thinkingLevel: wire } : { includeThoughts: true };
   const lowered = String(model || "").toLowerCase();
   for (const level of ["minimal", "low", "medium", "high"]) {
     if (lowered.endsWith(`-${level}`)) {
@@ -121,6 +132,9 @@ export function vertexThinkingFromRequest(model, body = {}, effort) {
       const mapped = thinkingLevelWire(level);
       return mapped ? { includeThoughts: true, thinkingLevel: mapped } : null;
     }
+  }
+  if (isThinkingVertexModel(model)) {
+    return isGemini3Or4 ? { includeThoughts: true, thinkingLevel: "HIGH" } : { includeThoughts: true };
   }
   return null;
 }

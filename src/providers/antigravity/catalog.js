@@ -326,8 +326,9 @@ export function extractEffortFromBody(body) {
     output && typeof output === "object" ? output.effort : null,
     typeof reasoning === "string" ? reasoning : null,
     reasoning && typeof reasoning === "object" ? reasoning.effort : null,
-    thinking && typeof thinking === "object" ? thinking.effort || thinking.thinkingLevel || thinking.thinking_level : null,
+    thinking && typeof thinking === "object" ? thinking.effort || thinking.thinkingLevel || thinking.thinking_level || thinking.level : null,
     thinking && typeof thinking === "object" && (thinking.type === "disabled" || thinking.type === "none") ? "none" : null,
+    thinking && typeof thinking === "object" && (thinking.type === "enabled" || thinking.type === "adaptive") && thinking.budget_tokens == null && thinking.thinkingBudget == null ? "high" : null,
   ];
   for (const value of candidates) {
     const effort = normalizeEffort(value);
